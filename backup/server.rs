@@ -5,7 +5,6 @@ use bevy::prelude::*;
 use bevy_quinnet::server::certificate::CertificateRetrievalMode;
 use bevy_quinnet::server::{QuinnetServer, QuinnetServerPlugin, ServerEndpointConfiguration};
 use bevy_quinnet::shared::channels::{ChannelKind, ChannelsConfiguration};
-use bevy_quinnet::shared::ClientId;
 use serde::{Deserialize, Serialize};
 
 // ✅ Те же типы, что в клиенте
@@ -27,20 +26,42 @@ struct PlayerPosition {
     y: f32,
 }
 
+#[derive(Serialize, Deserialize, Clone)]
+struct InputState {
+    up: bool,
+    down: bool,
+    left: bool,
+    right: bool,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+struct PlayerSnapshot {
+    id: u64,
+    x: f32,
+    y: f32,
+}
+
 #[derive(Resource, Default)]
-struct PlayerStates(HashMap<u64, (f32, f32)>);
+struct PlayerStates(HashMap<u64, Vec2>);
+
+#[derive(Resource)]
+struct ServerTickTimer(Timer);
 
 fn main() {
     App::new()
         .insert_resource(PlayerStates::default())
-        .add_plugins(DefaultPlugins)
+        .insert_resource(ServerTickTimer(Timer::from_seconds(
+            0.015,
+            TimerMode::Repeating,
+        ))) // 64Hz
+        .add_plugins(MinimalPlugins)
         .add_plugins(QuinnetServerPlugin::default())
-        .add_systems(Startup, setup)
-        .add_systems(Update, (handle_positions))
+        .add_systems(Startup, start_server)
+        .add_systems(Update, (process_inputs, server_tick))
         .run();
 }
 
-fn setup(mut endpoint: ResMut<QuinnetServer>) {
+fn start_server(mut endpoint: ResMut<QuinnetServer>) {
     let server_ip = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1));
     let server_port = 6000;
 
@@ -68,62 +89,59 @@ fn setup(mut endpoint: ResMut<QuinnetServer>) {
     println!("✅ Server started on {}:{}", server_ip, server_port);
 }
 
-fn handle_positions(mut server: ResMut<QuinnetServer>, mut state: ResMut<PlayerStates>) {
+fn process_inputs(mut server: ResMut<QuinnetServer>, mut states: ResMut<PlayerStates>) {
     let endpoint = server.endpoint_mut();
 
     // Получаем позиции от клиентов
     for client_id in endpoint.clients() {
-        while let Some((_channel_id, msg)) =
-            endpoint.try_receive_message_from::<PlayerPosition>(client_id)
+        while let Some((_channel_id, input)) =
+            endpoint.try_receive_message_from::<InputState>(client_id)
         {
-            println!("📥 Position from {}: {:?}", client_id, msg);
-            state.0.insert(msg.id, (msg.x, msg.y));
+            // println!("📥 Position from {}: {:?}", client_id, input);
+            let speed = 300.0;
+            let mut dir = Vec2::ZERO;
+            if input.up {
+                dir.y += 1.0;
+            }
+            if input.down {
+                dir.y -= 1.0;
+            }
+            if input.left {
+                dir.x -= 1.0;
+            }
+            if input.right {
+                dir.x += 1.0;
+            }
+            dir = dir.normalize_or_zero();
+            let pos = states.0.entry(client_id).or_insert(Vec2::ZERO);
+            *pos += dir * speed * 0.015; // Fixed tick time
         }
     }
-
-    // Формируем snapshot
-    let snapshot: Vec<PlayerPosition> = state
-        .0
-        .iter()
-        .map(|(&id, &(x, y))| PlayerPosition { id, x, y })
-        .collect();
-
-    // Рассылаем команду всем клиентам
-    if let Err(err) = endpoint.broadcast_message(snapshot.clone()) {
-        eprintln!("❌ Broadcast failed: {:?}", err);
-    } // else {
-      //     println!("📤 Broadcasted command {:?}", snapshot);
-      // }
 }
 
-// // ✅ Принимаем команды от клиентов и пересылаем всем
-// fn receive_and_broadcast(mut server: ResMut<QuinnetServer>) {
-//     let endpoint = server.endpoint_mut();
+fn server_tick(
+    time: Res<Time>,
+    mut timer: ResMut<ServerTickTimer>,
+    states: Res<PlayerStates>,
+    mut server: ResMut<QuinnetServer>,
+) {
+    if timer.0.tick(time.delta()).just_finished() {
+        let snapshot: Vec<PlayerSnapshot> = states
+            .0
+            .iter()
+            .map(|(&id, &pos)| PlayerSnapshot {
+                id,
+                x: pos.x,
+                y: pos.y,
+            })
+            .collect();
 
-//     for client_id in endpoint.clients() {
-//         while let Some((_channel_id, cmd)) =
-//             endpoint.try_receive_message_from::<CommandEvent>(client_id)
-//         {
-//             println!("📥 Command from {}: {:?}", client_id, cmd);
+        let endpoint = server.endpoint_mut();
 
-//             // Рассылаем команду всем клиентам
-//             if let Err(err) = endpoint.broadcast_message(cmd.clone()) {
-//                 eprintln!("❌ Broadcast failed: {:?}", err);
-//             } else {
-//                 println!("📤 Broadcasted command {:?}", cmd);
-//             }
-//         }
-//     }
-// }
-
-// // ✅ Просто тестовый broadcast каждые 2 сек
-// fn broadcast_ping(mut server: ResMut<QuinnetServer>, time: Res<Time>) {
-//     if time.elapsed_secs_f64() % 2.0 < 0.02 {
-//         if let Err(err) = server
-//             .endpoint_mut()
-//             .broadcast_message("📣 Ping from server".to_string())
-//         {
-//             eprintln!("❌ Broadcast error: {:?}", err);
-//         }
-//     }
-// }
+        if let Err(err) = endpoint.broadcast_message(snapshot.clone()) {
+            eprintln!("❌ Broadcast failed: {:?}", err);
+        } // else {
+          //     println!("📤 Broadcasted command {:?}", snapshot);
+          // }
+    }
+}
