@@ -1,0 +1,15 @@
+[package]
+name = "server"
+edition = "2024"
+version = "0.1.0"
+
+[[bin]]
+name = "server"
+path = "src/main.rs"
+
+[dependencies]
+bevy = { version = "0.16.1", default-features = false, features = ["bevy_asset", "bevy_render"] }
+bevy_window = "0.16.1"
+bevy_quinnet = "0.17.0"
+protocol = { path = "../protocol", features = ["quinnet"] }
+serde = "1"

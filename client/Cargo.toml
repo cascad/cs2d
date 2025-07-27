@@ -1,0 +1,18 @@
+[package]
+name = "client"
+edition = "2024"
+version = "0.1.0"
+
+[[bin]]
+name = "client"
+path = "src/main.rs"
+
+[dependencies]
+bevy = { version = "0.16.1" }
+
+bevy_quinnet = "0.17.0"
+
+# protocol нужна ТОЛЬКО фича "quinnet"
+protocol = { path = "../protocol", features = ["quinnet"] }
+
+serde = "1"
