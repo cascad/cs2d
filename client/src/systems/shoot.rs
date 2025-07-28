@@ -51,8 +51,8 @@ pub fn shoot_mouse(
     };
     let player_pos = match player_q.single() {
         Ok(t) => t.translation.truncate(),
-        Err(_) => {
-            println!("⚠️ [Client] No LocalPlayer");
+        Err(err) => {
+            println!("⚠️ [Client] No LocalPlayer: {:?}", err);
             return;
         }
     };

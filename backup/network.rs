@@ -14,7 +14,7 @@ pub fn receive_server_messages(
     mut commands: Commands,
     mut buffer: ResMut<SnapshotBuffer>,
     mut time_sync: ResMut<TimeSync>,
-    mut my: ResMut<MyPlayer>,
+    my: Res<MyPlayer>,
     mut pending: ResMut<PendingInputsClient>,
     mut q: Query<&mut Transform, With<LocalPlayer>>,
     mut spawned: ResMut<SpawnedPlayers>,
@@ -23,18 +23,6 @@ pub fn receive_server_messages(
     mut latency: ResMut<ClientLatency>,
     mut init_done: ResMut<InitialSpawnDone>,
 ) {
-    // ── Гейт: пока не знаем свой ID, не читаем пакеты ──
-    if !my.got {
-        if let Some(id) = client.connection().client_id() {
-            my.id = id;
-            my.got = true;
-            info!("[Client] got my id = {}", id);
-        } else {
-            // ещё не подключились — возвращаемся и не трогаем incoming queue
-            return;
-        }
-    }
-
     let conn = client.connection_mut();
     while let Some((chan, msg)) = conn.try_receive_message::<S2C>() {
         if chan != CH_S2C {

@@ -1,7 +1,7 @@
 use bevy::prelude::*;
 use bevy_quinnet::client::connection::ConnectionLocalId;
 use protocol::messages::{InputState, Stance, WorldSnapshot};
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 #[derive(Resource)]
 pub struct MyPlayer {
@@ -47,3 +47,23 @@ impl Default for HeartbeatTimer {
         HeartbeatTimer(Timer::from_seconds(1.0, TimerMode::Repeating))
     }
 }
+
+#[derive(Resource)]
+pub struct ClientLatency {
+    pub rtt: f64,
+    pub offset: f64,  // серверное время = client_time + one_way + offset
+    pub timer: Timer, // для пингования
+}
+
+impl Default for ClientLatency {
+    fn default() -> Self {
+        Self {
+            rtt: 0.0,
+            offset: 0.0,
+            timer: Timer::from_seconds(1.0, TimerMode::Repeating),
+        }
+    }
+}
+
+#[derive(Resource, Default)]
+pub struct InitialSpawnDone(pub bool);

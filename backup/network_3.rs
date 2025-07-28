@@ -14,7 +14,7 @@ pub fn receive_server_messages(
     mut commands: Commands,
     mut buffer: ResMut<SnapshotBuffer>,
     mut time_sync: ResMut<TimeSync>,
-    mut my: ResMut<MyPlayer>,
+    my: Res<MyPlayer>,
     mut pending: ResMut<PendingInputsClient>,
     mut q: Query<&mut Transform, With<LocalPlayer>>,
     mut spawned: ResMut<SpawnedPlayers>,
@@ -23,18 +23,6 @@ pub fn receive_server_messages(
     mut latency: ResMut<ClientLatency>,
     mut init_done: ResMut<InitialSpawnDone>,
 ) {
-    // ── Гейт: пока не знаем свой ID, не читаем пакеты ──
-    if !my.got {
-        if let Some(id) = client.connection().client_id() {
-            my.id = id;
-            my.got = true;
-            info!("[Client] got my id = {}", id);
-        } else {
-            // ещё не подключились — возвращаемся и не трогаем incoming queue
-            return;
-        }
-    }
-
     let conn = client.connection_mut();
     while let Some((chan, msg)) = conn.try_receive_message::<S2C>() {
         if chan != CH_S2C {
@@ -46,22 +34,16 @@ pub fn receive_server_messages(
             // 1) СНАПШОТ
             // ===================================================
             S2C::Snapshot(snap) => {
-                let now_client = time_in_seconds();
-
-                // 1) Time sync — один раз, на пустом буфере
+                // Time sync
                 if buffer.snapshots.is_empty() {
-                    time_sync.offset = now_client - snap.server_time;
-                    info!("[Network] time sync offset = {:.3}", time_sync.offset);
+                    time_sync.offset = time_in_seconds() - snap.server_time;
                 }
-
-                // 2) Reconciliation локального игрока
+                // Reconciliation
                 if let Ok(mut t) = q.single_mut() {
                     if let Some(ack) = snap.last_input_seq.get(&my.id) {
                         if let Some(ps) = snap.players.iter().find(|p| p.id == my.id) {
-                            // сброс позы до серверной
                             t.translation = Vec3::new(ps.x, ps.y, t.translation.z);
                             t.rotation = Quat::from_rotation_z(ps.rotation);
-                            // чистим подтверждённые инпуты
                             while let Some(front) = pending.0.front() {
                                 if front.seq <= *ack {
                                     pending.0.pop_front();
@@ -69,7 +51,6 @@ pub fn receive_server_messages(
                                     break;
                                 }
                             }
-                            // re‑simulate оставшиеся
                             for inp in pending.0.iter() {
                                 simulate_input(&mut *t, inp);
                             }
@@ -77,42 +58,72 @@ pub fn receive_server_messages(
                     }
                 }
 
-                // 3) Спавним **всех новых** игроков прямо из этого снапшота
-                for p in &snap.players {
-                    if spawned.0.insert(p.id) {
-                        // это новый для нас игрок
-                        let tf = Transform::from_xyz(p.x, p.y, 0.0)
-                            .with_rotation(Quat::from_rotation_z(p.rotation));
-                        if p.id == my.id {
-                            info!("[Network] spawn LOCAL {}", p.id);
-                            commands.spawn((
-                                Sprite {
-                                    color: Color::srgb(0.0, 1.0, 0.0),
-                                    custom_size: Some(Vec2::splat(40.0)),
-                                    ..default()
-                                },
-                                tf,
-                                GlobalTransform::default(),
-                                PlayerMarker(p.id),
-                                LocalPlayer,
-                            ));
+                // info!("[Network] checking initial spawn…");
+                // единовременный бэкофил: спавним всех, включая локального
+                if !init_done.0 && my.got {
+                    info!(
+                        "[Network] → Performing initial back‑fill of {} players",
+                        snap.players.len()
+                    );
+
+                    let mut spawned_any = false; // ← новый флажок
+
+                    for p in &snap.players {
+                        // отметим, что этого игрока мы уже спавнили
+                        if spawned.0.insert(p.id) {
+                            spawned_any = true; // ← отметили, что хоть один игрок появился
+
+                            let tf = Transform::from_xyz(p.x, p.y, 0.0)
+                                .with_rotation(Quat::from_rotation_z(p.rotation));
+                            // Логируем факт спавна
+                            info!(
+                                "[Network]   Spawning player {} at ({:.1},{:.1})",
+                                p.id, p.x, p.y
+                            );
+
+                            // собираем нужный bundle
+                            if p.id == my.id {
+                                // локальный
+                                commands.spawn((
+                                    Sprite {
+                                        color: Color::srgb(0.0, 1.0, 0.0),
+                                        custom_size: Some(Vec2::splat(40.0)),
+                                        ..default()
+                                    },
+                                    tf,
+                                    GlobalTransform::default(),
+                                    PlayerMarker(p.id),
+                                    LocalPlayer,
+                                ));
+                            } else {
+                                // чужой
+                                commands.spawn((
+                                    Sprite {
+                                        color: Color::srgb(0.2, 0.4, 1.0),
+                                        custom_size: Some(Vec2::splat(40.0)),
+                                        ..default()
+                                    },
+                                    tf,
+                                    GlobalTransform::default(),
+                                    PlayerMarker(p.id),
+                                ));
+                            };
+
+                            info!("[InitBackfill] Spawned {} at ({:.1},{:.1})", p.id, p.x, p.y);
                         } else {
-                            info!("[Network] spawn REMOTE {}", p.id);
-                            commands.spawn((
-                                Sprite {
-                                    color: Color::srgb(0.2, 0.4, 1.0),
-                                    custom_size: Some(Vec2::splat(40.0)),
-                                    ..default()
-                                },
-                                tf,
-                                GlobalTransform::default(),
-                                PlayerMarker(p.id),
-                            ));
+                            info!("[Network]   Already spawned player {}", p.id);
                         }
+                    }
+                    // Флаг переносим ВНЕ цикла:
+                    if spawned_any {
+                        info!("[Network] initial back‑fill finished");
+                        init_done.0 = true;
+                    } else {
+                        info!("[Network] snapshot пустой, ждём следующий");
                     }
                 }
 
-                // 5) Кладем в буфер (для интерполяции)
+                // Buffer for interpolation
                 buffer.snapshots.push_back(snap);
                 while buffer.snapshots.len() > 120 {
                     buffer.snapshots.pop_front();

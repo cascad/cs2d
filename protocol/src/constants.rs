@@ -12,3 +12,6 @@ pub const MAX_RAY_LEN: f32 = 400.0;
 
 // Timeout
 pub const TIMEOUT_SECS: f64 = 3.0;
+
+// Respawn
+pub const RESPAWN_COOLDOWN: f64 = 5.0;

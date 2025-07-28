@@ -9,6 +9,8 @@ pub enum C2S {
     Shoot(ShootEvent),
     Heartbeat,
     Goodbye,
+    Ping(f64), // отправить метку времени клиента (secs)
+    ThrowGrenade(GrenadeEvent),
 }
 
 // ----- Server → Client -----
@@ -17,6 +19,21 @@ pub enum S2C {
     Snapshot(WorldSnapshot),
     ShootFx(ShootFx),
     PlayerLeft(u64),
+    Pong {
+        // ответ сервера
+        client_time: f64,
+        server_time: f64,
+    },
+    GrenadeSpawn(GrenadeEvent), // ← спавн гранаты
+    PlayerDied {
+        victim: u64,
+        killer: Option<u64>,
+    },
+    PlayerRespawn {
+        id: u64,
+        x: f32,
+        y: f32,
+    },
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -73,4 +90,14 @@ pub struct WorldSnapshot {
     pub players: Vec<PlayerSnapshot>,
     pub server_time: f64,
     pub last_input_seq: HashMap<u64, u32>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct GrenadeEvent {
+    pub id: u64, // уникальный ID гранаты
+    pub from: Vec2,
+    pub dir: Vec2,
+    pub speed: f32,
+    pub timer: f32, // время до взрыва
+    pub timestamp: f64,
 }

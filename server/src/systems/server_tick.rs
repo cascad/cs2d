@@ -1,8 +1,8 @@
+use crate::resources::{AppliedSeqs, PendingInputs, PlayerStates, ServerTickTimer};
 use bevy::prelude::*;
-use protocol::constants::{TICK_DT, MOVE_SPEED, CH_S2C};
-use crate::resources::{PlayerStates, PendingInputs, AppliedSeqs, ServerTickTimer};
-use protocol::messages::{PlayerSnapshot, WorldSnapshot, S2C};
 use bevy_quinnet::server::QuinnetServer;
+use protocol::constants::{CH_S2C, MOVE_SPEED, TICK_DT};
+use protocol::messages::{PlayerSnapshot, S2C, WorldSnapshot};
 
 pub fn server_tick(
     time: Res<Time>,
@@ -12,7 +12,7 @@ pub fn server_tick(
     mut applied: ResMut<AppliedSeqs>,
     mut server: ResMut<QuinnetServer>,
 ) {
-     // ==== ДО построения снапшота ====
+    // ==== ДО построения снапшота ====
     {
         let list: Vec<u64> = states.0.keys().copied().collect();
         info!("🟢 PlayerStates BEFORE snapshot: {:?}", list);
@@ -26,10 +26,18 @@ pub fn server_tick(
         if let Some(last) = queue.back() {
             let st = states.0.entry(id).or_default();
             let mut dir = Vec2::ZERO;
-            if last.up    { dir.y += 1.0; }
-            if last.down  { dir.y -= 1.0; }
-            if last.left  { dir.x -= 1.0; }
-            if last.right { dir.x += 1.0; }
+            if last.up {
+                dir.y += 1.0;
+            }
+            if last.down {
+                dir.y -= 1.0;
+            }
+            if last.left {
+                dir.x -= 1.0;
+            }
+            if last.right {
+                dir.x += 1.0;
+            }
             st.pos += dir.normalize_or_zero() * MOVE_SPEED * TICK_DT;
             st.rot = last.rotation;
             st.stance = last.stance.clone();
@@ -39,19 +47,34 @@ pub fn server_tick(
     }
 
     let snapshot = WorldSnapshot {
-        players: states.0.iter().map(|(&id, st)| PlayerSnapshot {
-            id,
-            x: st.pos.x,
-            y: st.pos.y,
-            rotation: st.rot,
-            stance: st.stance.clone(),
-            hp: st.hp,
-        }).collect(),
+        players: states
+            .0
+            .iter()
+            .map(|(&id, st)| PlayerSnapshot {
+                id,
+                x: st.pos.x,
+                y: st.pos.y,
+                rotation: st.rot,
+                stance: st.stance.clone(),
+                hp: st.hp,
+            })
+            .collect(),
         server_time: time.elapsed_secs_f64(),
         last_input_seq: applied.0.clone(),
     };
 
     let ids: Vec<u64> = snapshot.players.iter().map(|p| p.id).collect();
+
+    info!(
+        "[Server] → Snapshot t={} players=[{}]",
+        snapshot.server_time,
+        snapshot
+            .players
+            .iter()
+            .map(|p| p.id.to_string())
+            .collect::<Vec<_>>()
+            .join(",")
+    );
 
     server
         .endpoint_mut()

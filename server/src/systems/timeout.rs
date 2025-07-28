@@ -1,7 +1,7 @@
 use bevy::prelude::*;
 use bevy_quinnet::server::QuinnetServer;
 use crate::resources::{LastHeard, PlayerStates, PendingInputs, AppliedSeqs};
-use protocol::{constants::{CH_S2C, TICK_DT, TIMEOUT_SECS}, messages::S2C};
+use protocol::{constants::{CH_S2C, TIMEOUT_SECS}, messages::S2C};
 
 pub fn drop_inactive(
     time: Res<Time>,

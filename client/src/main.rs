@@ -4,8 +4,7 @@ mod systems;
 
 use std::collections::VecDeque;
 
-use bevy::window::exit_on_primary_closed; // закрыть, когда окно закрыто
-use bevy::{prelude::*, window::ExitCondition};
+use bevy::prelude::*;
 use bevy_quinnet::client::QuinnetClientPlugin;
 
 use protocol::messages::Stance;
@@ -15,15 +14,12 @@ use protocol::constants::TICK_DT;
 // Подмодули
 use resources::*;
 use systems::{
-    bullet_lifecycle::bullet_lifecycle, disconnect::send_goodbye_and_close,
-    exit::exit_if_goodbye_done, grab_my_id::grab_my_id, heartbeat::send_heartbeat,
+    bullet_lifecycle::bullet_lifecycle, debug::debug_player_spawn, disconnect::GoodbyeSent,
+    grab_my_id::grab_my_id, grenade_lifecycle::grenade_lifecycle, grenade_throw::grenade_throw,
     input::change_stance, interpolate_with_snapshot::interpolate_with_snapshot,
-    network::receive_server_messages, rotate_to_cursor::rotate_to_cursor,
-    send_input::send_input_and_predict, shoot::shoot_mouse, spawn_new_players::spawn_new_players,
-    startup::setup,
+    network::receive_server_messages, ping::send_ping, rotate_to_cursor::rotate_to_cursor,
+    send_input::send_input_and_predict, shoot::shoot_mouse, startup::setup,
 };
-
-use crate::systems::disconnect::GoodbyeSent;
 
 fn main() {
     App::new()
@@ -44,6 +40,8 @@ fn main() {
         .insert_resource(PendingInputsClient::default())
         .insert_resource(GoodbyeSent::default())
         .insert_resource(HeartbeatTimer::default())
+        .insert_resource(ClientLatency::default())
+        .insert_resource(InitialSpawnDone::default())
         // плагины
         .add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: Some(Window {
@@ -53,51 +51,44 @@ fn main() {
             }),
             ..default()
         }))
-        .add_plugins(QuinnetClientPlugin::default())
         // системы
         .add_systems(Startup, setup)
-        // .add_systems(
-        //     Update,
-        //     (
-        //         grab_my_id,
-        //         rotate_to_cursor,
-        //         change_stance,
-        //         shoot_mouse,
-        //         send_input_and_predict,
-        //         receive_server_messages,
-        //         spawn_new_players,
-        //         remove_disconnected_players,
-        //         interpolate_with_snapshot,
-        //         bullet_lifecycle,
-        //     ),
-        // )
+        .add_systems(PreUpdate, receive_server_messages)
+        // .add_systems(Update, receive_server_messages)
         // 1) Сначала получаем новые снапшоты
-        .add_systems(Update, receive_server_messages)
-        // 2) Потом спавним появившихся игроков
-        .add_systems(Update, spawn_new_players.after(receive_server_messages))
         // 3) Затем удаляем ушедших
+        // 3) только теперь — плагин Quinnet (он добавит свои PreUpdate‑системы **после** наших)
+        .add_plugins(QuinnetClientPlugin::default())
+        // 4) Интерполируем всех
         // .add_systems(
         //     Update,
-        //     (
-        //         send_goodbye_and_close,                             // кадр N
-        //         exit_if_goodbye_done.after(send_goodbye_and_close), // кадр N+1
-        //         exit_on_primary_closed, // чтобы «крестик» дал WindowCloseRequested
-        //     ),
+        //     // interpolate_with_snapshot.after(receive_server_messages),
+        //     interpolate_with_snapshot,
         // )
-        // 4) Интерполируем всех
-        .add_systems(Update, interpolate_with_snapshot)
         // 5) Лайф‑цикл пуль
-        .add_systems(Update, bullet_lifecycle.after(interpolate_with_snapshot))
+        // .add_systems(Update, bullet_lifecycle.after(interpolate_with_snapshot))
+        // .add_systems(Update, bullet_lifecycle)
+        // grenades
+        // .add_systems(Update, (grenade_lifecycle, grenade_throw))
         // 6) Остальные системы ввода/рендера (по желанию тоже можете в нужном месте вставить)
         .add_systems(
             Update,
             (
-                grab_my_id.before(receive_server_messages),
+                // receive_server_messages,
+                interpolate_with_snapshot,
+                bullet_lifecycle,
+                grenade_lifecycle,
+                grenade_throw,
                 rotate_to_cursor.before(shoot_mouse),
+                // rotate_to_cursor,
                 change_stance.before(send_input_and_predict),
+                // change_stance,
+                // shoot_mouse,
                 shoot_mouse.before(send_input_and_predict),
                 send_input_and_predict.before(receive_server_messages),
-                send_heartbeat,
+                // send_input_and_predict,
+                send_ping,
+                debug_player_spawn,
             ),
         )
         .run();
