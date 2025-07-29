@@ -42,6 +42,7 @@ fn main() {
         .insert_resource(GoodbyeSent::default())
         .insert_resource(HeartbeatTimer::default())
         .insert_resource(ClientLatency::default())
+        .insert_resource(DeadPlayers::default())
         // плагины
         .add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: Some(Window {
