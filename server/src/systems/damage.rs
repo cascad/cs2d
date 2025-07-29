@@ -2,15 +2,10 @@ use bevy::prelude::*;
 use bevy_quinnet::server::QuinnetServer;
 use protocol::{constants::CH_S2C, messages::S2C};
 
-use crate::resources::{PlayerStates, RespawnDelay, RespawnQueue, RespawnTask};
-
-/// Событие урона: любой источник пишет сюда
-#[derive(Event)]
-pub struct DamageEvent {
-    pub target: u64,
-    pub amount: i32,
-    pub source: Option<u64>,
-}
+use crate::{
+    events::DamageEvent,
+    resources::{PlayerStates, RespawnDelay, RespawnQueue, RespawnTask},
+};
 
 pub fn apply_damage(
     mut ev_damage: EventReader<DamageEvent>,
@@ -26,7 +21,7 @@ pub fn apply_damage(
         if let Some(st) = states.0.get_mut(&ev.target) {
             println!("[DEBUG] states {:?}", st.hp);
             st.hp -= ev.amount;
-            
+
             info!(
                 "🩸 Player {} took {} dmg (hp={})",
                 ev.target, ev.amount, st.hp

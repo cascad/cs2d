@@ -6,5 +6,7 @@ pub mod timeout;
 pub mod grenades;
 pub mod death;
 pub mod damage;
-pub mod respawn;
 pub mod connection;
+pub mod spawn;
+pub mod respawn_timers;
+pub mod player_respawn;

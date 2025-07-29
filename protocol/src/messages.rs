@@ -34,6 +34,14 @@ pub enum S2C {
         x: f32,
         y: f32,
     },
+    PlayerConnected {
+        id: u64,
+        x: f32,
+        y: f32,
+    },
+    PlayerDisconnected {
+        id: u64,
+    },
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]

@@ -14,4 +14,4 @@ pub mod heartbeat;
 pub mod ping;
 pub mod grenade_throw;
 pub mod grenade_lifecycle;
-pub mod debug;
+pub mod connection;

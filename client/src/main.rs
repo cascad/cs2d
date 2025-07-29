@@ -1,4 +1,5 @@
 mod components;
+mod events;
 mod resources;
 mod systems;
 
@@ -14,11 +15,11 @@ use protocol::constants::TICK_DT;
 // Подмодули
 use resources::*;
 use systems::{
-    bullet_lifecycle::bullet_lifecycle, debug::debug_player_spawn, disconnect::GoodbyeSent,
-    grab_my_id::grab_my_id, grenade_lifecycle::grenade_lifecycle, grenade_throw::grenade_throw,
-    input::change_stance, interpolate_with_snapshot::interpolate_with_snapshot,
-    network::receive_server_messages, ping::send_ping, rotate_to_cursor::rotate_to_cursor,
-    send_input::send_input_and_predict, shoot::shoot_mouse, startup::setup,
+    bullet_lifecycle::bullet_lifecycle, disconnect::GoodbyeSent, grab_my_id::grab_my_id,
+    grenade_lifecycle::grenade_lifecycle, grenade_throw::grenade_throw, input::change_stance,
+    interpolate_with_snapshot::interpolate_with_snapshot, network::receive_server_messages,
+    ping::send_ping, rotate_to_cursor::rotate_to_cursor, send_input::send_input_and_predict,
+    shoot::shoot_mouse, connection::handle_connection_event, startup::setup,
 };
 
 fn main() {
@@ -41,7 +42,6 @@ fn main() {
         .insert_resource(GoodbyeSent::default())
         .insert_resource(HeartbeatTimer::default())
         .insert_resource(ClientLatency::default())
-        .insert_resource(InitialSpawnDone::default())
         // плагины
         .add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: Some(Window {
@@ -52,13 +52,14 @@ fn main() {
             ..default()
         }))
         // системы
+        .add_plugins(QuinnetClientPlugin::default())
         .add_systems(Startup, setup)
-        .add_systems(PreUpdate, receive_server_messages)
+        .add_systems(PreUpdate, (handle_connection_event, receive_server_messages).chain())
+        // .add_systems(PreUpdate, receive_server_messages)
         // .add_systems(Update, receive_server_messages)
         // 1) Сначала получаем новые снапшоты
         // 3) Затем удаляем ушедших
         // 3) только теперь — плагин Quinnet (он добавит свои PreUpdate‑системы **после** наших)
-        .add_plugins(QuinnetClientPlugin::default())
         // 4) Интерполируем всех
         // .add_systems(
         //     Update,
@@ -75,21 +76,20 @@ fn main() {
             Update,
             (
                 // receive_server_messages,
+                // grab_my_id,
+                // handle_connection_event,
+                // receive_server_messages,
+                send_input_and_predict,
                 interpolate_with_snapshot,
                 bullet_lifecycle,
                 grenade_lifecycle,
                 grenade_throw,
-                rotate_to_cursor.before(shoot_mouse),
-                // rotate_to_cursor,
-                change_stance.before(send_input_and_predict),
-                // change_stance,
-                // shoot_mouse,
-                shoot_mouse.before(send_input_and_predict),
-                send_input_and_predict.before(receive_server_messages),
-                // send_input_and_predict,
+                rotate_to_cursor,
+                change_stance,
+                shoot_mouse,
                 send_ping,
-                debug_player_spawn,
-            ),
+            )
+                .chain(),
         )
         .run();
 }

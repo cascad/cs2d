@@ -66,4 +66,18 @@ impl Default for ClientLatency {
 }
 
 #[derive(Resource, Default)]
-pub struct InitialSpawnDone(pub bool);
+pub struct ConnectedPlayers(pub HashSet<u64>);
+
+#[derive(Clone)]
+pub struct RespawnTask {
+    pub pid: u64,
+    pub due: f64,
+    pub pos: Vec2,
+}
+
+#[derive(Resource, Default)]
+pub struct RespawnQueue(pub Vec<RespawnTask>);
+
+#[derive(Resource, Default)]
+/// Tracks players who are currently “dead” and should _not_ be spawned
+pub struct DeadPlayers(pub HashSet<u64>);

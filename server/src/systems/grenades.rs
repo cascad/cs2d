@@ -1,6 +1,6 @@
+use crate::events::DamageEvent;
 use crate::resources::Grenades;
 use crate::resources::PlayerStates;
-use crate::systems::damage::DamageEvent;
 use bevy::prelude::*;
 use protocol::messages::GrenadeEvent;
 
@@ -36,7 +36,6 @@ pub fn update_grenades(
                 let dist = (pst.pos - ev.from).length();
                 if dist <= 100.0 {
                     let damage = ((100.0 - dist) / 100.0 * 50.0) as i32;
-                    println!("  → Grenades AAAA {:?} - {:?}", pid, damage); 
                     damage_events.write(DamageEvent {
                         target: pid,
                         amount: damage,

@@ -1,7 +1,6 @@
 use crate::components::{Bullet, GrenadeMarker, GrenadeTimer, LocalPlayer, PlayerMarker};
 use crate::resources::{
-    ClientLatency, InitialSpawnDone, MyPlayer, PendingInputsClient, SnapshotBuffer, SpawnedPlayers,
-    TimeSync,
+    ClientLatency, DeadPlayers, MyPlayer, PendingInputsClient, SnapshotBuffer, SpawnedPlayers, TimeSync
 };
 use crate::systems::utils::time_in_seconds;
 use bevy::prelude::*;
@@ -15,27 +14,16 @@ pub fn receive_server_messages(
     mut buffer: ResMut<SnapshotBuffer>,
     mut time_sync: ResMut<TimeSync>,
     mut my: ResMut<MyPlayer>,
+    mut dead_players: ResMut<DeadPlayers>,
     mut pending: ResMut<PendingInputsClient>,
-    mut q: Query<&mut Transform, With<LocalPlayer>>,
+    mut q_local: Query<&mut Transform, With<LocalPlayer>>,
     mut spawned: ResMut<SpawnedPlayers>,
     // todo fix q and query
-    query: Query<(Entity, &PlayerMarker)>,
+    q_marker: Query<(Entity, &PlayerMarker)>,
     mut latency: ResMut<ClientLatency>,
-    mut init_done: ResMut<InitialSpawnDone>,
 ) {
-    // ── Гейт: пока не знаем свой ID, не читаем пакеты ──
-    if !my.got {
-        if let Some(id) = client.connection().client_id() {
-            my.id = id;
-            my.got = true;
-            info!("[Client] got my id = {}", id);
-        } else {
-            // ещё не подключились — возвращаемся и не трогаем incoming queue
-            return;
-        }
-    }
-
     let conn = client.connection_mut();
+
     while let Some((chan, msg)) = conn.try_receive_message::<S2C>() {
         if chan != CH_S2C {
             continue;
@@ -55,7 +43,7 @@ pub fn receive_server_messages(
                 }
 
                 // 2) Reconciliation локального игрока
-                if let Ok(mut t) = q.single_mut() {
+                if let Ok(mut t) = q_local.single_mut() {
                     if let Some(ack) = snap.last_input_seq.get(&my.id) {
                         if let Some(ps) = snap.players.iter().find(|p| p.id == my.id) {
                             // сброс позы до серверной
@@ -141,17 +129,78 @@ pub fn receive_server_messages(
                 }
             }
             // ===================================================
+            // 2) СПАВН ИГРОКА (новый или респавн)
+            // ===================================================
+            S2C::PlayerConnected { id, x, y } | S2C::PlayerRespawn { id, x, y } => {
+                // 1) Если этот id уже есть — деспавним старую сущность
+                if spawned.0.remove(&id) {
+                    for (ent, marker) in q_marker.iter() {
+                        if marker.0 == id {
+                            commands.entity(ent).despawn();
+                            break;
+                        }
+                    }
+                }
+
+                // 2) Если это мы — сбрасываем буфер снапшотов
+                if id == my.id {
+                    buffer.snapshots.clear();
+                    // buffer.delay = DEFAULT_INTERP_DELAY; // или как у вас настроено
+                }
+
+                // 3) Спавним нового
+                let tf = Transform::from_xyz(x, y, 0.0);
+
+                if id == my.id {
+                    // спавним локального
+                    commands.spawn((
+                        Sprite {
+                            color: Color::srgb(0.0, 1.0, 0.0),
+                            custom_size: Some(Vec2::splat(40.0)),
+                            ..default()
+                        },
+                        tf,
+                        GlobalTransform::default(),
+                        PlayerMarker(id),
+                        LocalPlayer,
+                    ));
+                    info!("🔄 Я ({}) респавнился", id);
+                } else if spawned.0.insert(id) {
+                    // спавним чужого
+                    commands.spawn((
+                        Sprite {
+                            color: Color::srgb(0.2, 0.4, 1.0),
+                            custom_size: Some(Vec2::splat(40.0)),
+                            ..default()
+                        },
+                        tf,
+                        GlobalTransform::default(),
+                        PlayerMarker(id),
+                    ));
+                    info!("🔄 Игрок {} респавнился", id);
+                }
+                spawned.0.insert(id);
+            }
+            // ===================================================
             // 2) ИГРОК ВЫШЕЛ
             // ===================================================
             S2C::PlayerLeft(left_id) => {
-                if let Some((entity, _)) = query.iter().find(|(_, marker)| marker.0 == left_id) {
+                if let Some((entity, _)) = q_marker.iter().find(|(_, marker)| marker.0 == left_id) {
                     // 1) сразу удаляем сущность
                     commands.entity(entity).despawn();
                     spawned.0.remove(&left_id);
                     info!("🔌 PlayerLeft: игрок {} вышел — despawn", left_id);
-
-                    // 2) сбрасываем все старые снапшоты, чтобы не воскрешать
-                    buffer.snapshots.clear();
+                }
+            }
+            // ===================================================
+            // 2) ИГРОК ВЫШЕЛ 2 (event disconnect)
+            // ===================================================
+            S2C::PlayerDisconnected { id } => {
+                if let Some((entity, _)) = q_marker.iter().find(|(_, marker)| marker.0 == id) {
+                    // 1) сразу удаляем сущность
+                    commands.entity(entity).despawn();
+                    spawned.0.remove(&id);
+                    info!("🔌 PlayerLeft: игрок {} вышел — despawn", id);
                 }
             }
             // ===================================================
@@ -194,57 +243,21 @@ pub fn receive_server_messages(
                 info!("[Client]   PlayerDied victim={}", victim);
                 // если это мы — despawn своего спрайта
                 if victim == my.id {
-                    for (ent, _) in query.iter().filter(|(_, m)| m.0 == victim) {
+                    for (ent, _) in q_marker.iter().filter(|(_, m)| m.0 == victim) {
                         commands.entity(ent).despawn();
                         spawned.0.remove(&victim);
                     }
+                    // 2) сбрасываем все старые снапшоты, чтобы не воскрешать
+                    buffer.snapshots.clear();
                     // можно показать UI‑фразу или эффект «вы умерли»
                 }
                 // если это кто‑то другой — despawn его квадрат
-                else if let Some((ent, _)) = query.iter().find(|(_, m)| m.0 == victim) {
+                else if let Some((ent, _)) = q_marker.iter().find(|(_, m)| m.0 == victim) {
                     commands.entity(ent).despawn();
                     spawned.0.remove(&victim);
                 }
-                // 2) сбрасываем все старые снапшоты, чтобы не воскрешать
-                buffer.snapshots.clear();
 
                 info!("💀 Игрок {} погиб ({:?})", victim, killer);
-            }
-            // ===================================================
-            // 3) РЕСПАУН
-            // ===================================================
-            S2C::PlayerRespawn { id, x, y } => {
-                info!("[Client]   PlayerRespawn id={} at ({},{})", id, x, y);
-                // респавнимся именно в переданной точке
-                let tf = Transform::from_xyz(x, y, 0.0);
-                if id == my.id {
-                    // спавним локального
-                    commands.spawn((
-                        Sprite {
-                            color: Color::srgb(0.0, 1.0, 0.0),
-                            custom_size: Some(Vec2::splat(40.0)),
-                            ..default()
-                        },
-                        tf,
-                        GlobalTransform::default(),
-                        PlayerMarker(id),
-                        LocalPlayer,
-                    ));
-                    info!("🔄 Я ({}) респавнился", id);
-                } else if spawned.0.insert(id) {
-                    // спавним чужого
-                    commands.spawn((
-                        Sprite {
-                            color: Color::srgb(0.2, 0.4, 1.0),
-                            custom_size: Some(Vec2::splat(40.0)),
-                            ..default()
-                        },
-                        tf,
-                        GlobalTransform::default(),
-                        PlayerMarker(id),
-                    ));
-                    info!("🔄 Игрок {} респавнился", id);
-                }
             }
         }
     }
