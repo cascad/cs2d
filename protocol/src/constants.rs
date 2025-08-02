@@ -15,3 +15,10 @@ pub const TIMEOUT_SECS: f64 = 3.0;
 
 // Respawn
 pub const RESPAWN_COOLDOWN: f64 = 5.0;
+
+// Скорость полёта гранаты (пикселей в секунду)
+pub const GRENADE_SPEED: f32 = 275.0;
+// Время до взрыва
+pub const GRENADE_TIMER: f32 = 2.0;
+// Радиус взрыва (в тех же единицах, что и мир)
+pub const GRENADE_BLAST_RADIUS: f32 = 100.0;

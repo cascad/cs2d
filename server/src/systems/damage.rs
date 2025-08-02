@@ -19,14 +19,10 @@ pub fn apply_damage(
     for ev in ev_damage.read() {
         println!("[DEBUG] damage event {:?}- {:?}", ev.target, ev.amount);
         if let Some(st) = states.0.get_mut(&ev.target) {
-            println!("[DEBUG] states {:?}", st.hp);
+            println!("[DEBUG] damage={:?}", st.hp);
             st.hp -= ev.amount;
 
             info!(
-                "🩸 Player {} took {} dmg (hp={})",
-                ev.target, ev.amount, st.hp
-            );
-            println!(
                 "🩸 Player {} took {} dmg (hp={})",
                 ev.target, ev.amount, st.hp
             );

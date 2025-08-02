@@ -4,8 +4,8 @@ use crate::resources::{
 use crate::utils::{check_hit_lag_comp, push_history};
 use bevy::prelude::*;
 use bevy_quinnet::server::QuinnetServer;
-use protocol::constants::{CH_C2S, CH_S2C};
-use protocol::messages::{C2S, S2C, ShootFx};
+use protocol::constants::{CH_C2S, CH_S2C, GRENADE_SPEED, GRENADE_TIMER};
+use protocol::messages::{C2S, GrenadeEvent, S2C, ShootFx};
 
 pub fn process_c2s_messages(
     mut server: ResMut<QuinnetServer>,
@@ -80,8 +80,14 @@ pub fn process_c2s_messages(
                 }
                 C2S::ThrowGrenade(ev) => {
                     // сразу кидаем в ресурс Grenades
-                    println!("💣 [Server] ThrowGrenade from {} at {:?} (t={})", 
-                    client_id, ev.from, ev.timestamp);
+                    println!(
+                        "💣 [Server] ThrowGrenade from {} at {:?} (t={})",
+                        client_id, ev.from, ev.timestamp
+                    );
+
+                    // Нормализуем присланный вектор (на всякий случай)
+                    let dir = ev.dir.normalize_or_zero();
+
                     grenades.0.insert(
                         ev.id,
                         GrenadeState {
@@ -93,8 +99,19 @@ pub fn process_c2s_messages(
                     let grenade_id = ev.id;
                     // и рассылаем всем клиентам, чтобы они визуализировали гранату
                     endpoint
-                        .broadcast_message_on(CH_S2C, S2C::GrenadeSpawn(ev))
-                        .ok();
+                        .broadcast_message_on(
+                            CH_S2C,
+                            S2C::GrenadeSpawn(GrenadeEvent {
+                                id: ev.id,
+                                from: ev.from,
+                                dir, // ← не Vec2::X, а нормализованный dir
+                                speed: GRENADE_SPEED,
+                                timer: GRENADE_TIMER,
+                                timestamp: ev.timestamp,
+                            }),
+                        )
+                        .unwrap();
+
                     info!("💣 Клиент {} бросил гранату {}", client_id, grenade_id);
                 }
             }

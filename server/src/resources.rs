@@ -1,5 +1,4 @@
 use bevy::{
-    ecs::event::Event,
     math::Vec2,
     prelude::{Resource, Timer},
 };
@@ -77,7 +76,3 @@ pub struct ConnectedClients(pub HashSet<u64>);
 
 #[derive(Resource, Default)]
 pub struct SpawnedClients(pub HashSet<u64>);
-
-/// Таймеры респавна – id → respawn_at (server‑clock secs)
-#[derive(Resource, Default)]
-pub struct PendingRespawns(pub std::collections::HashMap<u64, f64>);

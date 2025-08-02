@@ -1,6 +1,7 @@
 use std::str::FromStr;
 
-use crate::components::{Bullet, GrenadeMarker, GrenadeTimer, LocalPlayer, PlayerMarker};
+use crate::components::{Bullet, Grenade, LocalPlayer, PlayerMarker};
+use crate::constants::{BULLET_SPEED, BULLET_TTL};
 use crate::resources::{
     ClientLatency, DeadPlayers, MyPlayer, PendingInputsClient, SnapshotBuffer, SpawnedPlayers,
     TimeSync,
@@ -8,7 +9,7 @@ use crate::resources::{
 use crate::systems::utils::time_in_seconds;
 use bevy::prelude::*;
 use bevy_quinnet::client::QuinnetClient;
-use protocol::constants::{CH_S2C, MOVE_SPEED, TICK_DT};
+use protocol::constants::{CH_S2C, GRENADE_BLAST_RADIUS, MOVE_SPEED, TICK_DT};
 use protocol::messages::{InputState, S2C};
 
 pub fn receive_server_messages(
@@ -78,39 +79,8 @@ pub fn receive_server_messages(
                     }
 
                     if spawned.0.insert(p.id) {
-                        // это новый для нас игрок
-                        // let tf = Transform::from_xyz(p.x, p.y, 0.0)
-                        //     .with_rotation(Quat::from_rotation_z(p.rotation));
-
                         let label = String::from_str("snapshot").unwrap();
                         spawn_player(&mut commands, &my, id, p.x, p.y, p.rotation, label);
-
-                        // if p.id == my.id {
-                        //     info!("[Network] spawn LOCAL {}", p.id);
-                        //     commands.spawn((
-                        //         Sprite {
-                        //             color: Color::srgb(0.0, 1.0, 0.0),
-                        //             custom_size: Some(Vec2::splat(40.0)),
-                        //             ..default()
-                        //         },
-                        //         tf,
-                        //         GlobalTransform::default(),
-                        //         PlayerMarker(p.id),
-                        //         LocalPlayer,
-                        //     ));
-                        // } else {
-                        //     info!("[Network] spawn REMOTE {}", p.id);
-                        //     commands.spawn((
-                        //         Sprite {
-                        //             color: Color::srgb(0.2, 0.4, 1.0),
-                        //             custom_size: Some(Vec2::splat(40.0)),
-                        //             ..default()
-                        //         },
-                        //         tf,
-                        //         GlobalTransform::default(),
-                        //         PlayerMarker(p.id),
-                        //     ));
-                        // }
                     }
                 }
 
@@ -136,8 +106,8 @@ pub fn receive_server_messages(
                             .with_rotation(Quat::from_rotation_z(fx.dir.y.atan2(fx.dir.x))),
                         GlobalTransform::default(),
                         Bullet {
-                            ttl: 0.35,
-                            vel: fx.dir * 900.0,
+                            ttl: BULLET_TTL,
+                            vel: fx.dir * BULLET_SPEED,
                         },
                     ));
                 }
@@ -161,48 +131,10 @@ pub fn receive_server_messages(
                     }
                 }
 
-                // 2) Если это мы — сбрасываем буфер снапшотов
-                // if id == my.id {
-                // buffer.snapshots.clear();
-                    // buffer.delay = DEFAULT_INTERP_DELAY; // или как у вас настроено
-                // }
-
-                // 3) Спавним нового
-                // let tf = Transform::from_xyz(x, y, 0.0);
-
                 let label = String::from_str("new/respawn").unwrap();
                 spawn_player(&mut commands, &my, id, x, y, 0.0, label);
 
                 spawned.0.insert(id);
-
-                // if id == my.id {
-                //     // спавним локального
-                //     commands.spawn((
-                //         Sprite {
-                //             color: Color::srgb(0.0, 1.0, 0.0),
-                //             custom_size: Some(Vec2::splat(40.0)),
-                //             ..default()
-                //         },
-                //         tf,
-                //         GlobalTransform::default(),
-                //         PlayerMarker(id),
-                //         LocalPlayer,
-                //     ));
-                //     info!("🔄 Я ({}) респавнился", id);
-                // } else if spawned.0.insert(id) {
-                //     // спавним чужого
-                //     commands.spawn((
-                //         Sprite {
-                //             color: Color::srgb(0.2, 0.4, 1.0),
-                //             custom_size: Some(Vec2::splat(40.0)),
-                //             ..default()
-                //         },
-                //         tf,
-                //         GlobalTransform::default(),
-                //         PlayerMarker(id),
-                //     ));
-                //     info!("🔄 Игрок {} респавнился", id);
-                // }
             }
             // ===================================================
             // 2) ИГРОК ВЫШЕЛ
@@ -249,18 +181,31 @@ pub fn receive_server_messages(
             // 2) Спавн гранаты
             // ===================================================
             S2C::GrenadeSpawn(ev) => {
-                commands.spawn((
-                    GrenadeMarker(ev.id),
-                    Sprite {
-                        color: Color::WHITE,
-                        custom_size: Some(Vec2::new(12.0, 2.0)),
-                        ..default()
-                    },
-                    Transform::from_translation(ev.from.extend(10.0))
+                // 1) создаём пустую сущность
+                let mut e = commands.spawn_empty();
+
+                // 2) базовые трансформы
+                e.insert(
+                    Transform::from_translation(ev.from.extend(0.0))
                         .with_rotation(Quat::from_rotation_z(ev.dir.y.atan2(ev.dir.x))),
-                    GlobalTransform::default(),
-                    GrenadeTimer(Timer::from_seconds(ev.timer, TimerMode::Once)),
-                ));
+                )
+                .insert(GlobalTransform::default());
+
+                // 3) спрайт‑квад: цвет + размер
+                e.insert(Sprite {
+                    color: Color::srgb(0.9, 0.15, 0.15),
+                    custom_size: Some(Vec2::splat(16.0)),
+                    ..default()
+                });
+
+                // 4) логика гранаты
+                e.insert(Grenade {
+                    dir: ev.dir,
+                    speed: ev.speed,
+                    timer: Timer::from_seconds(ev.timer, TimerMode::Once),
+                    blast_radius: GRENADE_BLAST_RADIUS,
+                });
+
                 info!("💣 GrenadeSpawn {}", ev.id);
             }
             // ===================================================
@@ -313,7 +258,7 @@ fn simulate_input(t: &mut Transform, inp: &InputState) {
     t.rotation = Quat::from_rotation_z(inp.rotation);
 }
 
-/// Утилита для единообразного создания сущности игрока.
+// Утилита для единообразного создания сущности игрока.
 fn spawn_player(
     commands: &mut Commands,
     me: &ResMut<MyPlayer>,

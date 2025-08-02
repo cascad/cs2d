@@ -2,44 +2,53 @@ use crate::events::DamageEvent;
 use crate::resources::Grenades;
 use crate::resources::PlayerStates;
 use bevy::prelude::*;
-use protocol::messages::GrenadeEvent;
+use protocol::constants::GRENADE_BLAST_RADIUS;
 
-/// Состояние брошенной гранаты
-pub struct GrenadeState {
-    pub ev: GrenadeEvent,
-    pub created: f64,
-}
-
-/// Тикаем гранаты и отправляем события урона
+/// Обновляем таймеры гранат и наносим урон при взрыве
 pub fn update_grenades(
     mut grenades: ResMut<Grenades>,
-    states: Res<PlayerStates>, // ← доступ к позициям игроков
+    states: Res<PlayerStates>, // Позиции игроков
     mut damage_events: EventWriter<DamageEvent>,
     time: Res<Time>,
 ) {
     let now = time.elapsed_secs_f64();
     let mut to_explode = Vec::new();
 
-    // Собираем гранаты с истекшим таймером
-    for (&id, st) in grenades.0.iter() {
-        if now - st.created >= st.ev.timer as f64 {
+    // Собираем гранаты, у которых истёк таймер
+    for (&id, state) in grenades.0.iter() {
+        if now - state.created >= state.ev.timer as f64 {
             to_explode.push(id);
         }
     }
 
-    // Для каждой взорвавшейся — считаем попадания и шлём DamageEvent
+    // Обрабатываем взрывы
     for id in to_explode {
         if let Some(gs) = grenades.0.remove(&id) {
             let ev = gs.ev;
-            // Пробегаем по всем живым игрокам
+
+            // 🔥 Расчёт текущей позиции гранаты
+            let lifetime = (now - gs.created) as f32;
+            let pos = ev.from + ev.dir * ev.speed * lifetime;
+
+            info!("💥 Grenade {} exploded at {:?}", ev.id, pos);
+
+            // Проверка расстояния до всех игроков
             for (&pid, pst) in states.0.iter() {
-                let dist = (pst.pos - ev.from).length();
-                if dist <= 100.0 {
-                    let damage = ((100.0 - dist) / 100.0 * 50.0) as i32;
+                let dist = (pst.pos - pos).length();
+                let radius = GRENADE_BLAST_RADIUS;
+
+                if dist <= radius {
+                    let damage = ((radius - dist) / radius * 50.0) as i32;
+
+                    info!(
+                        "💥 → Player {} is within radius ({:.1}). Damage = {}",
+                        pid, dist, damage
+                    );
+
                     damage_events.write(DamageEvent {
                         target: pid,
                         amount: damage,
-                        source: Some(ev.id), // кто нанес
+                        source: Some(ev.id),
                     });
                 }
             }

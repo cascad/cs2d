@@ -2,6 +2,7 @@ use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 use bevy_quinnet::client::QuinnetClient;
 use crate::components::{LocalPlayer, Bullet};
+use crate::constants::{BULLET_SPEED, BULLET_TTL};
 use crate::resources::{MyPlayer};
 use crate::systems::utils::time_in_seconds;
 use protocol::messages::{ShootEvent, C2S};
@@ -83,10 +84,10 @@ fn spawn_tracer(commands: &mut Commands, from: Vec2, dir: Vec2) {
         },
         Transform::from_translation(from.extend(10.0))
             .with_rotation(Quat::from_rotation_z(dir.y.atan2(dir.x))),
-        GlobalTransform::default(), // ← add this
+        GlobalTransform::default(),
         Bullet {
-            ttl: 0.35,
-            vel: dir * 900.0,
+            ttl: BULLET_TTL,
+            vel: dir * BULLET_SPEED,
         },
     ));
 }

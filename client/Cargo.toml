@@ -8,7 +8,10 @@ name = "client"
 path = "src/main.rs"
 
 [dependencies]
-bevy = { version = "0.16.1" , features = ["bevy_sprite"]}
+bevy = { version = "0.16.1" , features = [
+    "bevy_asset",
+    "bevy_sprite", 
+    ]}
 
 bevy_quinnet = "0.17.0"
 

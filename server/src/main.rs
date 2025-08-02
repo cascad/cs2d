@@ -13,7 +13,7 @@ use constants::*;
 use events::*;
 use resources::*;
 use systems::{
-    connection::*, damage::*, grenades::*, process_c2s::*, player_respawn::*,
+    connection::*, damage::*, grenades::*, process_c2s::*,
     respawn_timers::*, server_tick::*, spawn::*, startup::*, timeout::*,
 };
 
