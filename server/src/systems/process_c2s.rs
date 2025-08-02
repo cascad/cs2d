@@ -1,3 +1,4 @@
+use crate::events::DamageEvent;
 use crate::resources::{
     AppliedSeqs, GrenadeState, Grenades, LastGrenadeThrows, LastHeard, PendingInputs, PlayerStates,
     SnapshotHistory,
@@ -5,7 +6,9 @@ use crate::resources::{
 use crate::utils::{check_hit_lag_comp, push_history};
 use bevy::prelude::*;
 use bevy_quinnet::server::QuinnetServer;
-use protocol::constants::{CH_C2S, CH_S2C, GRENADE_SPEED, GRENADE_TIMER, GRENADE_USAGE_COOLDOWN};
+use protocol::constants::{
+    CH_C2S, CH_S2C, GRENADE_SPEED, GRENADE_TIMER, GRENADE_USAGE_COOLDOWN, SHOOT_RIFLE_DAMAGE,
+};
 use protocol::messages::{C2S, GrenadeEvent, S2C, ShootFx};
 
 pub fn process_c2s_messages(
@@ -17,6 +20,7 @@ pub fn process_c2s_messages(
     mut history: ResMut<SnapshotHistory>,
     mut grenades: ResMut<Grenades>,
     mut last_grenade: ResMut<LastGrenadeThrows>,
+    mut damage_events: EventWriter<DamageEvent>,
     time: Res<Time>,
 ) {
     let now = time.elapsed_secs_f64();
@@ -34,10 +38,17 @@ pub fn process_c2s_messages(
                     pending.0.entry(client_id).or_default().push_back(input);
                 }
                 C2S::Shoot(shoot) => {
-                    println!("🔫 [Server] ShootEvent from {}: {:?}", client_id, shoot);
+                    // println!("🔫 [Server] ShootEvent from {}: {:?}", client_id, shoot);
                     if let Some(hit) = check_hit_lag_comp(&history.buf, &states.0, &shoot) {
                         println!("💥 [Server] hit target {}", hit);
+
+                        damage_events.write(DamageEvent {
+                            target: hit,
+                            amount: SHOOT_RIFLE_DAMAGE as i32,
+                            source: Some(shoot.shooter_id),
+                        });
                     }
+
                     if let Some(st) = states.0.get(&shoot.shooter_id) {
                         let fx = ShootFx {
                             shooter_id: shoot.shooter_id,
