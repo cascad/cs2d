@@ -42,6 +42,11 @@ pub enum S2C {
     PlayerDisconnected {
         id: u64,
     },
+    PlayerDamaged {
+        id: u64,
+        new_hp: i32,
+        damage: i32,
+    },
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]

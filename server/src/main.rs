@@ -52,6 +52,7 @@ fn main() {
         .insert_resource(RespawnDelay::default())
         .insert_resource(ConnectedClients::default())
         .insert_resource(SpawnedClients::default())
+        .insert_resource(LastGrenadeThrows::default())
         .add_plugins(MinimalPlugins)
         .add_plugins(QuinnetServerPlugin::default())
         .add_event::<ConnectionEvent>() // регистрируем событие в ECS

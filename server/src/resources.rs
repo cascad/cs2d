@@ -76,3 +76,8 @@ pub struct ConnectedClients(pub HashSet<u64>);
 
 #[derive(Resource, Default)]
 pub struct SpawnedClients(pub HashSet<u64>);
+
+#[derive(Resource, Default)]
+pub struct LastGrenadeThrows {
+    pub map: HashMap<u64, f64>, // client_id → last throw time
+}

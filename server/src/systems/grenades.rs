@@ -3,6 +3,7 @@ use crate::resources::Grenades;
 use crate::resources::PlayerStates;
 use bevy::prelude::*;
 use protocol::constants::GRENADE_BLAST_RADIUS;
+use protocol::constants::GRENADE_DAMAGE_COEFF;
 
 /// Обновляем таймеры гранат и наносим урон при взрыве
 pub fn update_grenades(
@@ -38,7 +39,8 @@ pub fn update_grenades(
                 let radius = GRENADE_BLAST_RADIUS;
 
                 if dist <= radius {
-                    let damage = ((radius - dist) / radius * 50.0) as i32;
+                    let base_damage = ((radius - dist) / radius * 50.0) * GRENADE_DAMAGE_COEFF;
+                    let damage = base_damage as i32;
 
                     info!(
                         "💥 → Player {} is within radius ({:.1}). Damage = {}",

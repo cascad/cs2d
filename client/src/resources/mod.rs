@@ -4,6 +4,7 @@ use protocol::messages::{InputState, Stance, WorldSnapshot};
 use std::collections::{HashSet, VecDeque};
 
 pub mod explosion_textures;
+pub mod grenades;
 
 #[derive(Resource)]
 pub struct MyPlayer {
@@ -73,3 +74,6 @@ pub struct ConnectedPlayers(pub HashSet<u64>);
 #[derive(Resource, Default)]
 /// Tracks players who are currently “dead” and should _not_ be spawned
 pub struct DeadPlayers(pub HashSet<u64>);
+
+#[derive(Resource, Clone)]
+pub struct UiFont(pub Handle<Font>);

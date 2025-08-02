@@ -2,11 +2,13 @@ use std::str::FromStr;
 
 use crate::components::{Bullet, Grenade, LocalPlayer, PlayerMarker};
 use crate::constants::{BULLET_SPEED, BULLET_TTL};
+use crate::events::PlayerDamagedEvent;
 use crate::resources::{
     ClientLatency, DeadPlayers, MyPlayer, PendingInputsClient, SnapshotBuffer, SpawnedPlayers,
-    TimeSync,
+    TimeSync, UiFont,
 };
-use crate::systems::utils::time_in_seconds;
+use crate::systems::utils::{spawn_hp_ui, time_in_seconds};
+use crate::ui::components::PlayerHpUi;
 use bevy::prelude::*;
 use bevy_quinnet::client::QuinnetClient;
 use protocol::constants::{CH_S2C, GRENADE_BLAST_RADIUS, MOVE_SPEED, TICK_DT};
@@ -25,6 +27,9 @@ pub fn receive_server_messages(
     // todo fix q and query
     q_marker: Query<(Entity, &PlayerMarker)>,
     mut latency: ResMut<ClientLatency>,
+    mut ev_damage: EventWriter<PlayerDamagedEvent>,
+    q_hp_ui: Query<(Entity, &PlayerHpUi)>,
+    font: Res<UiFont>,
 ) {
     let conn = client.connection_mut();
 
@@ -80,7 +85,7 @@ pub fn receive_server_messages(
 
                     if spawned.0.insert(p.id) {
                         let label = String::from_str("snapshot").unwrap();
-                        spawn_player(&mut commands, &my, id, p.x, p.y, p.rotation, label);
+                        spawn_player(&mut commands, &my, &font, id, p.x, p.y, p.rotation, label);
                     }
                 }
 
@@ -131,8 +136,10 @@ pub fn receive_server_messages(
                     }
                 }
 
+                spawn_hp_ui(&mut commands, id, 100, font.0.clone());
+
                 let label = String::from_str("new/respawn").unwrap();
-                spawn_player(&mut commands, &my, id, x, y, 0.0, label);
+                spawn_player(&mut commands, &my, &font, id, x, y, 0.0, label);
 
                 spawned.0.insert(id);
             }
@@ -178,6 +185,13 @@ pub fn receive_server_messages(
                 // info!("💓 Pong: RTT={:.3}s, offset={:.3}s", rtt, latency.offset);
             }
             // ===================================================
+            // 2) УРОН НАНЕСЕН
+            // ===================================================
+            S2C::PlayerDamaged { id, new_hp, damage } => {
+                // println!("Игрок {id} получил {damage} урона, осталось {new_hp} HP");
+                ev_damage.write(PlayerDamagedEvent { id, new_hp, damage });
+            }
+            // ===================================================
             // 2) Спавн гранаты
             // ===================================================
             S2C::GrenadeSpawn(ev) => {
@@ -213,6 +227,12 @@ pub fn receive_server_messages(
             // ===================================================
             S2C::PlayerDied { victim, killer } => {
                 info!("[Client]   PlayerDied victim={}", victim);
+
+                for (ent, hp_ui) in q_hp_ui.iter() {
+                    if hp_ui.player_id  == victim {
+                        commands.entity(ent).despawn();
+                    }
+                }
 
                 // помечаем убитого «мертвым»
                 dead.0.insert(victim);
@@ -262,6 +282,7 @@ fn simulate_input(t: &mut Transform, inp: &InputState) {
 fn spawn_player(
     commands: &mut Commands,
     me: &ResMut<MyPlayer>,
+    font: &Res<UiFont>,
     id: u64,
     x: f32,
     y: f32,
@@ -282,6 +303,9 @@ fn spawn_player(
             PlayerMarker(id),
             LocalPlayer,
         ));
+        // рисуем ui
+        spawn_hp_ui(commands, id, 100, font.0.clone());
+
         info!("[Client]{from} spawn LOCAL {}", id);
     } else {
         // чужой (синий)

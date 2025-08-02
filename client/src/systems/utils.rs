@@ -2,6 +2,9 @@ use bevy::prelude::*;
 use protocol::constants::{MOVE_SPEED, TICK_DT};
 use protocol::messages::{InputState, Stance};
 
+use crate::resources::UiFont;
+use crate::ui::components::PlayerHpUi;
+
 pub fn time_in_seconds() -> f64 {
     use std::time::{SystemTime, UNIX_EPOCH};
     let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
@@ -41,4 +44,17 @@ pub fn lerp_angle(a: f32, b: f32, t: f32) -> f32 {
         diff -= diff.signum() * std::f32::consts::TAU;
     }
     a + diff * t
+}
+
+pub fn spawn_hp_ui(commands: &mut Commands, player_id: u64, hp: u32, font: Handle<Font>) {
+    commands.spawn((
+        Text2d(format!("{} HP", hp)),
+        TextFont {
+            font: font.into(),
+            font_size: 14.0,
+            ..Default::default()
+        },
+        TextColor(Color::WHITE.into()),
+        PlayerHpUi { player_id },
+    ));
 }

@@ -17,20 +17,33 @@ pub fn apply_damage(
 ) {
     let now = time.elapsed_secs_f64();
     for ev in ev_damage.read() {
-        println!("[DEBUG] damage event {:?}- {:?}", ev.target, ev.amount);
+        // println!("[DEBUG] damage event player:{:?} {:?}", ev.target, ev.amount);
         if let Some(st) = states.0.get_mut(&ev.target) {
-            println!("[DEBUG] damage={:?}", st.hp);
             st.hp -= ev.amount;
 
-            info!(
+            // todo not work info! here
+            println!(
                 "🩸 Player {} took {} dmg (hp={})",
                 ev.target, ev.amount, st.hp
             );
 
+            let endpoint = server.endpoint_mut();
+
+            // send damage event
+            endpoint
+                .broadcast_message_on(
+                    CH_S2C,
+                    S2C::PlayerDamaged {
+                        id: ev.target,
+                        new_hp: st.hp,
+                        damage: ev.amount,
+                    },
+                )
+                .ok();
+
             if st.hp <= 0 {
                 // 1) сразу рассылаем PlayerDied
-                server
-                    .endpoint_mut()
+                endpoint
                     .broadcast_message_on(
                         CH_S2C,
                         S2C::PlayerDied {

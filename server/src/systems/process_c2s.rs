@@ -1,10 +1,11 @@
 use crate::resources::{
-    AppliedSeqs, GrenadeState, Grenades, LastHeard, PendingInputs, PlayerStates, SnapshotHistory,
+    AppliedSeqs, GrenadeState, Grenades, LastGrenadeThrows, LastHeard, PendingInputs, PlayerStates,
+    SnapshotHistory,
 };
 use crate::utils::{check_hit_lag_comp, push_history};
 use bevy::prelude::*;
 use bevy_quinnet::server::QuinnetServer;
-use protocol::constants::{CH_C2S, CH_S2C, GRENADE_SPEED, GRENADE_TIMER};
+use protocol::constants::{CH_C2S, CH_S2C, GRENADE_SPEED, GRENADE_TIMER, GRENADE_USAGE_COOLDOWN};
 use protocol::messages::{C2S, GrenadeEvent, S2C, ShootFx};
 
 pub fn process_c2s_messages(
@@ -15,6 +16,7 @@ pub fn process_c2s_messages(
     mut applied: ResMut<AppliedSeqs>,
     mut history: ResMut<SnapshotHistory>,
     mut grenades: ResMut<Grenades>,
+    mut last_grenade: ResMut<LastGrenadeThrows>,
     time: Res<Time>,
 ) {
     let now = time.elapsed_secs_f64();
@@ -79,11 +81,23 @@ pub fn process_c2s_messages(
                         .ok();
                 }
                 C2S::ThrowGrenade(ev) => {
-                    // сразу кидаем в ресурс Grenades
-                    println!(
-                        "💣 [Server] ThrowGrenade from {} at {:?} (t={})",
-                        client_id, ev.from, ev.timestamp
-                    );
+                    let cooldown = GRENADE_USAGE_COOLDOWN;
+
+                    let can_throw = match last_grenade.map.get(&client_id) {
+                        Some(&last_time) => now - last_time >= cooldown,
+                        None => true,
+                    };
+
+                    if !can_throw {
+                        info!(
+                            "⏳ Client {} tried to throw grenade before cooldown finished",
+                            client_id
+                        );
+                        continue; // Пропускаем бросок
+                    }
+
+                    // Обновляем время последнего броска
+                    last_grenade.map.insert(client_id, now);
 
                     // Нормализуем присланный вектор (на всякий случай)
                     let dir = ev.dir.normalize_or_zero();

@@ -21,4 +21,8 @@ pub const GRENADE_SPEED: f32 = 275.0;
 // Время до взрыва
 pub const GRENADE_TIMER: f32 = 2.0;
 // Радиус взрыва (в тех же единицах, что и мир)
-pub const GRENADE_BLAST_RADIUS: f32 = 100.0;
+pub const GRENADE_BLAST_RADIUS: f32 = 200.0;
+// secs
+pub const GRENADE_USAGE_COOLDOWN: f64 = 2.0;
+
+pub const GRENADE_DAMAGE_COEFF: f32 = 3.0;

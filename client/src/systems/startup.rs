@@ -1,4 +1,4 @@
-use crate::resources::CurrentConnId;
+use crate::resources::{CurrentConnId, UiFont};
 use bevy::prelude::*;
 use bevy_quinnet::client::QuinnetClient;
 use bevy_quinnet::client::certificate::CertificateVerificationMode;
@@ -22,4 +22,9 @@ pub fn setup(mut commands: Commands, mut client: ResMut<QuinnetClient>) {
 
     // сохраняем ID в ресурсе
     commands.insert_resource(CurrentConnId(Some(conn_id)));
+}
+
+pub fn load_ui_font(mut commands: Commands, asset_server: Res<AssetServer>) {
+    let handle = asset_server.load("fonts/FiraSans-Bold.ttf");
+    commands.insert_resource(UiFont(handle));
 }

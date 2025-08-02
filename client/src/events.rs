@@ -6,3 +6,10 @@ pub struct PlayerDied {
     pub victim: u64,
     pub killer: Option<u64>,
 }
+
+#[derive(Event)]
+pub struct PlayerDamagedEvent {
+    pub id: u64,
+    pub new_hp: i32,
+    pub damage: i32,
+}

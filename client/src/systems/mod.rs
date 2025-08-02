@@ -11,3 +11,6 @@ pub mod ping;
 pub mod grenade_throw;
 pub mod grenade_lifecycle;
 pub mod connection;
+pub mod spawn_damage_popups;
+pub mod update_hp_ui;
+pub mod sync_hp_ui;

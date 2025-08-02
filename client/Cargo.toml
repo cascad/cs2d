@@ -11,6 +11,8 @@ path = "src/main.rs"
 bevy = { version = "0.16.1" , features = [
     "bevy_asset",
     "bevy_sprite", 
+    "bevy_render",
+    "png", "x11",
     ]}
 
 bevy_quinnet = "0.17.0"

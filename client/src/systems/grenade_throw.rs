@@ -1,4 +1,8 @@
-use crate::{components::LocalPlayer, resources::MyPlayer, systems::utils::time_in_seconds};
+use crate::{
+    components::LocalPlayer,
+    resources::{MyPlayer, grenades::GrenadeCooldown},
+    systems::utils::time_in_seconds,
+};
 use bevy::prelude::*;
 use bevy_quinnet::client::QuinnetClient;
 use protocol::{
@@ -13,8 +17,13 @@ pub fn grenade_throw(
     player_query: Query<&Transform, With<LocalPlayer>>,
     windows: Query<&Window>,
     camera_q: Query<(&Camera, &GlobalTransform)>,
+    mut grenade_cd: ResMut<GrenadeCooldown>,
+    time: Res<Time>,
 ) {
-    if !keys.just_pressed(KeyCode::KeyG) {
+    // Обновляем кулдаун
+    grenade_cd.0.tick(time.delta());
+
+    if !keys.just_pressed(KeyCode::KeyG) || !grenade_cd.0.finished() {
         return;
     }
 
@@ -80,6 +89,9 @@ pub fn grenade_throw(
         .send_message_on(CH_C2S, C2S::ThrowGrenade(ev.clone()))
         .is_ok()
     {
+        // После успешного отправления
+        grenade_cd.0.reset();
+
         info!(
             "💣 Sent ThrowGrenade {}, speed: {}, timer: {}",
             ev.id, ev.speed, ev.timer

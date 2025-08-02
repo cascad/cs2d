@@ -3,6 +3,7 @@ mod constants;
 mod events;
 mod resources;
 mod systems;
+mod ui;
 
 use std::collections::VecDeque;
 
@@ -22,6 +23,17 @@ use systems::{
     interpolate_with_snapshot::interpolate_with_snapshot, network::receive_server_messages,
     ping::send_ping, rotate_to_cursor::rotate_to_cursor, send_input::send_input_and_predict,
     shoot::shoot_mouse, startup::setup,
+};
+use ui::{grenade_ui::setup_ui, update_grenade_cooldown_ui::update_grenade_cooldown_ui};
+
+use crate::{
+    events::PlayerDamagedEvent,
+    resources::grenades::GrenadeCooldown,
+    systems::{
+        spawn_damage_popups::{spawn_damage_popups, update_damage_popups},
+        startup::load_ui_font,
+        sync_hp_ui::{sync_hp_ui_position, update_hp_text_from_event},
+    },
 };
 
 fn main() {
@@ -44,6 +56,9 @@ fn main() {
         .insert_resource(HeartbeatTimer::default())
         .insert_resource(ClientLatency::default())
         .insert_resource(DeadPlayers::default())
+        .insert_resource(GrenadeCooldown::default())
+        // ивенты
+        .add_event::<PlayerDamagedEvent>()
         // плагины
         .add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: Some(Window {
@@ -55,7 +70,7 @@ fn main() {
         }))
         // системы
         .add_plugins(QuinnetClientPlugin::default())
-        .add_systems(Startup, setup)
+        .add_systems(Startup, (setup, setup_ui, load_ui_font))
         .add_systems(
             PreUpdate,
             (handle_connection_event, receive_server_messages).chain(),
@@ -75,6 +90,16 @@ fn main() {
                 send_ping,
             )
                 .chain(),
+        )
+        .add_systems(
+            Update,
+            (
+                update_grenade_cooldown_ui,
+                spawn_damage_popups,
+                update_damage_popups,
+                sync_hp_ui_position,
+                update_hp_text_from_event,
+            ),
         )
         .run();
 }

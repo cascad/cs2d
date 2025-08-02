@@ -5,7 +5,7 @@ use crate::{
 use bevy::prelude::*;
 use bevy_quinnet::server::QuinnetServer;
 use protocol::constants::CH_S2C;
-use protocol::messages::{S2C};
+use protocol::messages::S2C;
 
 // todo загружать логику спавнов отдельно
 /// Функция, где вы решаете стартовую позицию
@@ -87,7 +87,9 @@ pub fn process_player_respawn(
 ) {
     for PlayerRespawn { id, x, y } in ev.read() {
         spawned.0.insert(*id);
-        states.0.entry(*id).or_default().pos = Vec2::new(*x, *y);
+        let st = states.0.entry(*id).or_default();
+        st.pos = Vec2::new(*x, *y);
+        st.hp = 100;
 
         server
             .endpoint_mut()
