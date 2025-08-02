@@ -2,13 +2,12 @@ use std::str::FromStr;
 
 use crate::components::{Bullet, Grenade, LocalPlayer, PlayerMarker};
 use crate::constants::{BULLET_SPEED, BULLET_TTL};
-use crate::events::PlayerDamagedEvent;
+use crate::events::{PlayerDamagedEvent, PlayerDied, PlayerLeftEvent};
 use crate::resources::{
-    ClientLatency, DeadPlayers, MyPlayer, PendingInputsClient, SnapshotBuffer, SpawnedPlayers,
-    TimeSync, UiFont,
+    ClientLatency, DeadPlayers, HpUiMap, MyPlayer, PendingInputsClient, SnapshotBuffer,
+    SpawnedPlayers, TimeSync, UiFont,
 };
 use crate::systems::utils::{spawn_hp_ui, time_in_seconds};
-use crate::ui::components::PlayerHpUi;
 use bevy::prelude::*;
 use bevy_quinnet::client::QuinnetClient;
 use protocol::constants::{CH_S2C, GRENADE_BLAST_RADIUS, MOVE_SPEED, TICK_DT};
@@ -28,7 +27,9 @@ pub fn receive_server_messages(
     q_marker: Query<(Entity, &PlayerMarker)>,
     mut latency: ResMut<ClientLatency>,
     mut ev_damage: EventWriter<PlayerDamagedEvent>,
-    q_hp_ui: Query<(Entity, &PlayerHpUi)>,
+    mut hp_ui_map: ResMut<HpUiMap>,
+    mut ev_player_died: EventWriter<PlayerDied>,
+    mut ev_player_left: EventWriter<PlayerLeftEvent>,
     font: Res<UiFont>,
 ) {
     let conn = client.connection_mut();
@@ -85,7 +86,12 @@ pub fn receive_server_messages(
 
                     if spawned.0.insert(p.id) {
                         let label = String::from_str("snapshot").unwrap();
-                        spawn_player(&mut commands, &my, &font, id, p.x, p.y, p.rotation, label);
+                        spawn_player(&mut commands, &my, id, p.x, p.y, p.rotation, label);
+                    }
+
+                    if !hp_ui_map.0.contains_key(&p.id) {
+                        let entity = spawn_hp_ui(&mut commands, p.id, p.hp as u32, font.0.clone());
+                        hp_ui_map.0.insert(p.id, entity);
                     }
                 }
 
@@ -136,10 +142,10 @@ pub fn receive_server_messages(
                     }
                 }
 
-                spawn_hp_ui(&mut commands, id, 100, font.0.clone());
+                // spawn_hp_ui(&mut commands, id, 100, font.0.clone());
 
                 let label = String::from_str("new/respawn").unwrap();
-                spawn_player(&mut commands, &my, &font, id, x, y, 0.0, label);
+                spawn_player(&mut commands, &my, id, x, y, 0.0, label);
 
                 spawned.0.insert(id);
             }
@@ -155,6 +161,8 @@ pub fn receive_server_messages(
                     spawned.0.remove(&left_id);
                     info!("🔌 PlayerLeft: игрок {} вышел — despawn", left_id);
                 }
+
+                ev_player_left.write(PlayerLeftEvent(left_id));
             }
             // ===================================================
             // 2) ИГРОК ВЫШЕЛ 2 (event disconnect)
@@ -168,6 +176,8 @@ pub fn receive_server_messages(
                     spawned.0.remove(&id);
                     info!("🔌 PlayerLeft: игрок {} вышел — despawn", id);
                 }
+
+                ev_player_left.write(PlayerLeftEvent(id));
             }
             // ===================================================
             // 2) PONG
@@ -228,11 +238,12 @@ pub fn receive_server_messages(
             S2C::PlayerDied { victim, killer } => {
                 info!("[Client]   PlayerDied victim={}", victim);
 
-                for (ent, hp_ui) in q_hp_ui.iter() {
-                    if hp_ui.player_id  == victim {
-                        commands.entity(ent).despawn();
-                    }
-                }
+                // todo rm
+                // for (ent, hp_ui) in q_hp_ui.iter() {
+                //     if hp_ui.player_id == victim {
+                //         commands.entity(ent).despawn();
+                //     }
+                // }
 
                 // помечаем убитого «мертвым»
                 dead.0.insert(victim);
@@ -252,6 +263,11 @@ pub fn receive_server_messages(
                     commands.entity(ent).despawn();
                     spawned.0.remove(&victim);
                 }
+
+                ev_player_died.write(PlayerDied {
+                    victim: victim,
+                    killer: killer,
+                });
 
                 info!("💀 Игрок {} погиб ({:?})", victim, killer);
             }
@@ -282,7 +298,6 @@ fn simulate_input(t: &mut Transform, inp: &InputState) {
 fn spawn_player(
     commands: &mut Commands,
     me: &ResMut<MyPlayer>,
-    font: &Res<UiFont>,
     id: u64,
     x: f32,
     y: f32,
@@ -303,8 +318,6 @@ fn spawn_player(
             PlayerMarker(id),
             LocalPlayer,
         ));
-        // рисуем ui
-        spawn_hp_ui(commands, id, 100, font.0.clone());
 
         info!("[Client]{from} spawn LOCAL {}", id);
     } else {

@@ -13,3 +13,6 @@ pub struct PlayerDamagedEvent {
     pub new_hp: i32,
     pub damage: i32,
 }
+
+#[derive(Event)]
+pub struct PlayerLeftEvent(pub u64); // id игрока

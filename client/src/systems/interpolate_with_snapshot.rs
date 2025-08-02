@@ -2,7 +2,6 @@ use crate::components::PlayerMarker;
 use crate::resources::{MyPlayer, SnapshotBuffer, TimeSync};
 use crate::systems::utils::{lerp_angle, stance_color, time_in_seconds};
 use bevy::prelude::*;
-use protocol::messages::Stance;
 use std::collections::HashMap;
 
 pub fn interpolate_with_snapshot(

@@ -2,7 +2,7 @@ use bevy::prelude::*;
 
 use crate::ui::update_grenade_cooldown_ui::GrenadeCooldownBar;
 
-pub fn setup_ui(mut commands: Commands) {
+pub fn setup_grenade_ui(mut commands: Commands) {
     // создаём родительский UI-элемент (полоска фона)
     commands
         .spawn((

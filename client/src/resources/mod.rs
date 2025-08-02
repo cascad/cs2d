@@ -1,7 +1,7 @@
 use bevy::prelude::*;
 use bevy_quinnet::client::connection::ConnectionLocalId;
 use protocol::messages::{InputState, Stance, WorldSnapshot};
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 pub mod explosion_textures;
 pub mod grenades;
@@ -77,3 +77,6 @@ pub struct DeadPlayers(pub HashSet<u64>);
 
 #[derive(Resource, Clone)]
 pub struct UiFont(pub Handle<Font>);
+
+#[derive(Resource, Default)]
+pub struct HpUiMap(pub HashMap<u64, Entity>);

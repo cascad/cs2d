@@ -10,7 +10,7 @@ pub const MOVE_SPEED: f32 = 300.0;
 pub const HITBOX_RADIUS: f32 = 20.0;
 // от этого зависит обсчет попаданий (на такой дистанции)
 // дальность стрельбы
-pub const MAX_RAY_LEN: f32 = 800.0;
+pub const MAX_RAY_LEN: f32 = 3000.0;
 
 // Timeout
 pub const TIMEOUT_SECS: f64 = 3.0;

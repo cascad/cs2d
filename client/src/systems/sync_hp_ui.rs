@@ -1,37 +1,53 @@
-use crate::{components::PlayerMarker, events::PlayerDamagedEvent, ui::components::PlayerHpUi};
+use crate::{
+    components::PlayerMarker,
+    events::{PlayerDamagedEvent, PlayerDied, PlayerLeftEvent},
+    resources::HpUiMap,
+};
 use bevy::prelude::*;
 
 pub fn sync_hp_ui_position(
-    player_query: Query<(&Transform, &PlayerMarker), Without<PlayerHpUi>>,
-    mut ui_query: Query<(&mut Transform, &PlayerHpUi)>,
+    player_query: Query<(&Transform, &PlayerMarker), With<PlayerMarker>>,
+    mut hp_ui_map: ResMut<HpUiMap>,
+    mut ui_tf_query: Query<&mut Transform, Without<PlayerMarker>>,
 ) {
-    // Кэшируем позиции всех игроков
-    let mut player_positions = Vec::new();
-    for (tf, marker) in player_query.iter() {
-        player_positions.push((marker.0, tf.translation));
-    }
-
-    // Обновляем позиции UI
-    for (mut ui_tf, hp_ui) in ui_query.iter_mut() {
-        if let Some((_, player_pos)) = player_positions
-            .iter()
-            .find(|(id, _)| *id == hp_ui.player_id)
-        {
-            ui_tf.translation.x = player_pos.x;
-            ui_tf.translation.y = player_pos.y + 32.0;
+    for (player_tf, marker) in player_query.iter() {
+        if let Some(&ui_ent) = hp_ui_map.0.get(&marker.0) {
+            if let Ok(mut ui_tf) = ui_tf_query.get_mut(ui_ent) {
+                ui_tf.translation.x = player_tf.translation.x;
+                ui_tf.translation.y = player_tf.translation.y + 32.0;
+            }
         }
     }
 }
 
 pub fn update_hp_text_from_event(
     mut evr: EventReader<PlayerDamagedEvent>,
-    mut query: Query<(&PlayerHpUi, &mut Text2d)>, // или другой компонент, если не Text2d
+    hp_ui_map: Res<HpUiMap>,
+    mut text_query: Query<&mut Text2d>,
 ) {
     for ev in evr.read() {
-        for (hp_ui, mut text) in query.iter_mut() {
-            if hp_ui.player_id == ev.id {
-                text.0 = format!("{} HP", ev.new_hp);
+        if let Some(&ui_ent) = hp_ui_map.0.get(&ev.id) {
+            if let Ok(mut text2d) = text_query.get_mut(ui_ent) {
+                text2d.0 = format!("{} HP", ev.new_hp);
             }
+        }
+    }
+}
+
+pub fn cleanup_hp_ui_on_player_remove(
+    mut commands: Commands,
+    mut hp_ui_map: ResMut<HpUiMap>,
+    mut ev_died: EventReader<PlayerDied>,
+    mut ev_left: EventReader<PlayerLeftEvent>,
+) {
+    for ev in ev_died.read() {
+        if let Some(ent) = hp_ui_map.0.remove(&ev.victim) {
+            commands.entity(ent).despawn();
+        }
+    }
+    for ev in ev_left.read() {
+        if let Some(ent) = hp_ui_map.0.remove(&ev.0) {
+            commands.entity(ent).despawn();
         }
     }
 }
