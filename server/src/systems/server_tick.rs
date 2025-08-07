@@ -43,16 +43,13 @@ pub fn server_tick(
     mut server: ResMut<QuinnetServer>,
     wall_q: Query<(&Transform, &Sprite), With<Wall>>,  // walls for collision
 ) {
-    // 1) Wait for tick end
     if !timer.0.tick(time.delta()).just_finished() {
         return;
     }
 
-    // 2) Apply all inputs with sliding collision
     for (&id, queue) in pending.0.iter_mut() {
         if let Some(input) = queue.back() {
             let st = states.0.entry(id).or_default();
-            // compute direction
             let mut dir = Vec2::ZERO;
             if input.up    { dir.y += 1.; }
             if input.down  { dir.y -= 1.; }
@@ -62,15 +59,18 @@ pub fn server_tick(
 
             let current = st.pos;
             let delta   = dir * MOVE_SPEED * TICK_DT;
-            // sliding: X then Y
             let mut new = current;
-            let tx = new + Vec2::new(delta.x, 0.);
-            if !is_blocked(tx, &wall_q) { new.x = tx.x; }
-            let ty = new + Vec2::new(0., delta.y);
-            if !is_blocked(ty, &wall_q) { new.y = ty.y; }
+
+            let proposed_x = Vec2::new(current.x + delta.x, current.y);
+            if !is_blocked(proposed_x, &wall_q) {
+                new.x = proposed_x.x;
+            }
+            let proposed_y = Vec2::new(new.x, current.y + delta.y);
+            if !is_blocked(proposed_y, &wall_q) {
+                new.y = proposed_y.y;
+            }
             st.pos = new;
 
-            // store rotation, stance, seq
             st.rot    = input.rotation;
             st.stance = input.stance.clone();
             applied.0.insert(id, input.seq);
@@ -78,7 +78,6 @@ pub fn server_tick(
         queue.clear();
     }
 
-    // 3) Build snapshot
     let snapshot = WorldSnapshot {
         players: states.0.iter().map(|(&id, st)| PlayerSnapshot {
             id,
@@ -92,11 +91,9 @@ pub fn server_tick(
         last_input_seq: applied.0.clone(),
     };
 
-    // 4) Broadcast
     server.endpoint_mut()
         .broadcast_message_on(CH_S2C, S2C::Snapshot(snapshot.clone()))
         .unwrap();
 
-    // 5) History
     push_history(&mut history, snapshot.server_time, &states.0);
 }
