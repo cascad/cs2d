@@ -8,24 +8,7 @@ pub fn time_in_seconds() -> f64 {
     now.as_secs_f64()
 }
 
-pub fn simulate_input(t: &mut Transform, inp: &InputState) {
-    let mut dir = Vec2::ZERO;
-    if inp.up {
-        dir.y += 1.0;
-    }
-    if inp.down {
-        dir.y -= 1.0;
-    }
-    if inp.left {
-        dir.x -= 1.0;
-    }
-    if inp.right {
-        dir.x += 1.0;
-    }
-    dir = dir.normalize_or_zero();
-    t.translation += (dir * MOVE_SPEED * TICK_DT).extend(0.0);
-    t.rotation = Quat::from_rotation_z(inp.rotation);
-}
+
 
 pub fn stance_color(s: &Stance) -> Color {
     match s {

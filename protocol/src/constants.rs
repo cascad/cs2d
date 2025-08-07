@@ -30,3 +30,12 @@ pub const GRENADE_USAGE_COOLDOWN: f64 = 2.0;
 pub const GRENADE_DAMAGE_COEFF: f32 = 3.0;
 
 pub const SHOOT_RIFLE_DAMAGE: f32 = 20.0;
+
+// размер уровня (по центру, координаты в world space)
+pub const LEVEL_WIDTH: f32 = 1200.0;
+pub const LEVEL_HEIGHT: f32 = 800.0;
+pub const WALL_THICKNESS: f32 = 40.0;
+
+pub const PLAYER_SIZE: f32 = 32.0;
+
+pub const TILE_SIZE: f32 = 32.0;

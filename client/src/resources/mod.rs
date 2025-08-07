@@ -80,3 +80,7 @@ pub struct UiFont(pub Handle<Font>);
 
 #[derive(Resource, Default)]
 pub struct HpUiMap(pub HashMap<u64, Entity>);
+
+// Ресурс карты, заполняется на клиенте при загрузке уровня (или из сервера).
+#[derive(Resource, Default)]
+pub struct SolidTiles(pub std::collections::HashSet<IVec2>);

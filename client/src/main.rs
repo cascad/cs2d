@@ -7,7 +7,10 @@ mod ui;
 
 use std::collections::VecDeque;
 
-use bevy::prelude::*;
+use bevy::{
+    log::{Level, LogPlugin},
+    prelude::*,
+};
 use bevy_quinnet::client::QuinnetClientPlugin;
 
 use protocol::messages::Stance;
@@ -30,6 +33,7 @@ use crate::{
     events::{PlayerDamagedEvent, PlayerDied, PlayerLeftEvent},
     resources::grenades::GrenadeCooldown,
     systems::{
+        level::{fill_solid_tiles_once, spawn_level},
         spawn_damage_popups::{spawn_damage_popups, update_damage_popups},
         startup::load_ui_font,
         sync_hp_ui::{
@@ -61,30 +65,45 @@ fn main() {
         .insert_resource(DeadPlayers::default())
         .insert_resource(GrenadeCooldown::default())
         .insert_resource(HpUiMap::default())
+        .insert_resource(SolidTiles::default())
         // ивенты
         .add_event::<PlayerDamagedEvent>()
         .add_event::<PlayerDied>()
         .add_event::<PlayerLeftEvent>()
         // плагины
-        .add_plugins(DefaultPlugins.set(WindowPlugin {
-            primary_window: Some(Window {
-                title: "CS‑style Multiplayer Client".into(),
-                resolution: (800.0, 600.0).into(),
+        .add_plugins(
+            DefaultPlugins.set(WindowPlugin {
+                primary_window: Some(Window {
+                    title: "CS‑style Multiplayer Client".into(),
+                    resolution: (800.0, 600.0).into(),
+                    ..default()
+                }),
                 ..default()
-            }),
-            ..default()
-        }))
+            }), // .set(LogPlugin {
+                //     level: Level::DEBUG, // миsнимальный уровень, который логируется
+                //     filter: "client::systems::send_input=debug,bevy_ecs=info".into(), // включаем твой модуль
+                //     ..default()
+                // }),
+        )
         // системы
         .add_plugins(QuinnetClientPlugin::default())
-        .add_systems(Startup, (setup, load_ui_font, setup_grenade_ui))
+        .add_systems(
+            Startup,
+            (setup, spawn_level, load_ui_font, setup_grenade_ui),
+        )
         .add_systems(
             PreUpdate,
-            (handle_connection_event, receive_server_messages).chain(),
+            (
+                send_input_and_predict,
+                handle_connection_event,
+                receive_server_messages,
+            )
+                .chain(),
         )
         .add_systems(
             Update,
             (
-                send_input_and_predict,
+                fill_solid_tiles_once,
                 interpolate_with_snapshot,
                 bullet_lifecycle,
                 grenade_lifecycle,

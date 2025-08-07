@@ -10,7 +10,7 @@ use crate::resources::{
 use crate::systems::utils::{spawn_hp_ui, time_in_seconds};
 use bevy::prelude::*;
 use bevy_quinnet::client::QuinnetClient;
-use protocol::constants::{CH_S2C, GRENADE_BLAST_RADIUS, MOVE_SPEED, TICK_DT};
+use protocol::constants::{CH_S2C, GRENADE_BLAST_RADIUS, MOVE_SPEED, PLAYER_SIZE, TICK_DT};
 use protocol::messages::{InputState, S2C};
 
 pub fn receive_server_messages(
@@ -310,7 +310,7 @@ fn spawn_player(
         commands.spawn((
             Sprite {
                 color: Color::srgb(0.0, 1.0, 0.0),
-                custom_size: Some(Vec2::splat(32.0)),
+                custom_size: Some(Vec2::splat(PLAYER_SIZE)),
                 ..default()
             },
             tf,
@@ -325,7 +325,7 @@ fn spawn_player(
         commands.spawn((
             Sprite {
                 color: Color::srgb(0.2, 0.4, 1.0),
-                custom_size: Some(Vec2::splat(32.0)),
+                custom_size: Some(Vec2::splat(PLAYER_SIZE)),
                 ..default()
             },
             tf,
