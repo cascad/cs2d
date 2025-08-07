@@ -7,3 +7,4 @@ pub mod damage;
 pub mod connection;
 pub mod spawn;
 pub mod respawn_timers;
+pub mod wall;

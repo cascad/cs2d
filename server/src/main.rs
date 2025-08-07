@@ -17,7 +17,7 @@ use systems::{
     respawn_timers::*, server_tick::*, spawn::*, startup::*, timeout::*,
 };
 
-use crate::systems::spawn::process_player_respawn;
+use crate::systems::{spawn::process_player_respawn, wall::spawn_level_server};
 // use systems::{
 //     connection::{handle_disconnections, handle_new_connections},
 //     damage::{DamageEvent, apply_damage},
@@ -61,7 +61,7 @@ fn main() {
         .add_event::<ClientConnected>()
         .add_event::<ClientDisconnected>()
         .add_event::<PlayerRespawn>()
-        .add_systems(Startup, start_server)
+        .add_systems(Startup, (start_server, spawn_level_server).chain())
         .add_systems(PreUpdate, (handle_new_connections, handle_disconnections))
         .add_systems(
             Update,
