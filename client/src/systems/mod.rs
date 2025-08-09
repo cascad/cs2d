@@ -18,3 +18,4 @@ pub mod render_detonations;
 pub mod walls_cache;
 pub mod corpse_lc;
 pub mod reconcile_colors;
+pub mod connecting_pump;

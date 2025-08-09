@@ -90,3 +90,6 @@ pub struct WallAabbCache(pub Vec<(Vec2, Vec2)>); // (min, max)
 
 #[derive(Resource, Default)]
 pub struct LastKnownPos(pub HashMap<u64, (Vec2, f32)>); // id -> (pos, rot)
+
+#[derive(Resource, Default)]
+pub struct ConnectError(pub Option<String>);

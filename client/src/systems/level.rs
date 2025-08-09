@@ -6,8 +6,6 @@ use crate::resources::SolidTiles;
 #[derive(Component)]
 pub struct Wall;
 
-
-
 pub fn spawn_level_client(mut commands: Commands) {
     let half_w = LEVEL_WIDTH / 2.0;
     let half_h = LEVEL_HEIGHT / 2.0;
@@ -15,32 +13,64 @@ pub fn spawn_level_client(mut commands: Commands) {
 
     // 4 границы
     commands.spawn((
-        Sprite { color: wall_color, custom_size: Some(Vec2::new(WALL_THICKNESS, LEVEL_HEIGHT + WALL_THICKNESS * 2.0)), ..default() },
+        Sprite {
+            color: wall_color,
+            custom_size: Some(Vec2::new(
+                WALL_THICKNESS,
+                LEVEL_HEIGHT + WALL_THICKNESS * 2.0,
+            )),
+            ..default()
+        },
         Transform::from_translation(Vec3::new(-half_w - WALL_THICKNESS / 2.0, 0.0, 0.0)),
         GlobalTransform::default(),
         Wall,
     ));
     commands.spawn((
-        Sprite { color: wall_color, custom_size: Some(Vec2::new(WALL_THICKNESS, LEVEL_HEIGHT + WALL_THICKNESS * 2.0)), ..default() },
-        Transform::from_translation(Vec3::new( half_w + WALL_THICKNESS / 2.0, 0.0, 0.0)),
+        Sprite {
+            color: wall_color,
+            custom_size: Some(Vec2::new(
+                WALL_THICKNESS,
+                LEVEL_HEIGHT + WALL_THICKNESS * 2.0,
+            )),
+            ..default()
+        },
+        Transform::from_translation(Vec3::new(half_w + WALL_THICKNESS / 2.0, 0.0, 0.0)),
         GlobalTransform::default(),
         Wall,
     ));
     commands.spawn((
-        Sprite { color: wall_color, custom_size: Some(Vec2::new(LEVEL_WIDTH + WALL_THICKNESS * 2.0, WALL_THICKNESS)), ..default() },
-        Transform::from_translation(Vec3::new(0.0,  half_h + WALL_THICKNESS / 2.0, 0.0)),
+        Sprite {
+            color: wall_color,
+            custom_size: Some(Vec2::new(
+                LEVEL_WIDTH + WALL_THICKNESS * 2.0,
+                WALL_THICKNESS,
+            )),
+            ..default()
+        },
+        Transform::from_translation(Vec3::new(0.0, half_h + WALL_THICKNESS / 2.0, 0.0)),
         GlobalTransform::default(),
         Wall,
     ));
     commands.spawn((
-        Sprite { color: wall_color, custom_size: Some(Vec2::new(LEVEL_WIDTH + WALL_THICKNESS * 2.0, WALL_THICKNESS)), ..default() },
+        Sprite {
+            color: wall_color,
+            custom_size: Some(Vec2::new(
+                LEVEL_WIDTH + WALL_THICKNESS * 2.0,
+                WALL_THICKNESS,
+            )),
+            ..default()
+        },
         Transform::from_translation(Vec3::new(0.0, -half_h - WALL_THICKNESS / 2.0, 0.0)),
         GlobalTransform::default(),
         Wall,
     ));
     // центральная
     commands.spawn((
-        Sprite { color: wall_color, custom_size: Some(Vec2::new(WALL_THICKNESS, LEVEL_HEIGHT * 0.8)), ..default() },
+        Sprite {
+            color: wall_color,
+            custom_size: Some(Vec2::new(WALL_THICKNESS, LEVEL_HEIGHT * 0.8)),
+            ..default()
+        },
         Transform::from_translation(Vec3::new(0.0, 0.0, 0.0)),
         GlobalTransform::default(),
         Wall,
@@ -52,7 +82,9 @@ pub fn fill_solid_tiles_once(
     q_walls: Query<(&Transform, &Sprite), With<Wall>>,
     mut done: Local<bool>,
 ) {
-    if *done { return; }
+    if *done {
+        return;
+    }
 
     for (tf, sprite) in q_walls.iter() {
         // Размер стены (custom_size всегда Some у твоих спрайтов)

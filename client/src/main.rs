@@ -5,19 +5,18 @@ mod resources;
 mod systems;
 mod ui;
 
+// +++ добавили +++
+mod app_state;
+mod menu;
+
 use std::collections::VecDeque;
 
-use bevy::{
-    log::{Level, LogPlugin},
-    prelude::*,
-};
+use bevy::prelude::*;
 use bevy_quinnet::client::QuinnetClientPlugin;
 
-use protocol::messages::Stance;
-// Импортим общий протокол и адаптер
 use protocol::constants::TICK_DT;
+use protocol::messages::Stance;
 
-// Подмодули
 use resources::*;
 use systems::{
     bullet_lifecycle::bullet_lifecycle,
@@ -36,22 +35,26 @@ use systems::{
 use ui::update_grenade_cooldown_ui::update_grenade_cooldown_ui;
 
 use crate::{
+    app_state::AppState, // enum AppState { Menu, Connecting, InGame }
     events::{
         GrenadeDetonatedEvent, GrenadeSpawnEvent, PlayerDamagedEvent, PlayerDied, PlayerLeftEvent,
     },
+    menu::{MenuPlugin, clear_connect_timeout, connection_timeout_system},
     resources::grenades::{ClientGrenades, GrenadeCooldown, GrenadeStates},
     systems::{
+        // +++ насос Connecting: ждём первый Snapshot, затем -> InGame +++
+        connecting_pump::connecting_pump,
         corpse_lc::corpse_lifecycle,
         grenade_lifecycle::spawn_grenades,
         level::{fill_solid_tiles_once, spawn_level_client},
         network::apply_grenade_net,
+        reconcile_colors::reconcile_local_and_colors,
         render_detonations::render_detonations,
         spawn_damage_popups::{spawn_damage_popups, update_damage_popups},
         startup::load_ui_font,
         sync_hp_ui::{
             cleanup_hp_ui_on_player_remove, sync_hp_ui_position, update_hp_text_from_event,
         },
-        reconcile_colors::{debug_player_colors_on_added, reconcile_local_and_colors},
         walls_cache::build_wall_aabb_cache,
     },
     ui::grenade_ui::setup_grenade_ui,
@@ -91,36 +94,44 @@ fn main() {
         .add_event::<GrenadeSpawnEvent>()
         .add_event::<GrenadeDetonatedEvent>()
         // плагины
-        .add_plugins(
-            DefaultPlugins.set(WindowPlugin {
-                primary_window: Some(Window {
-                    title: "CS‑style Multiplayer Client".into(),
-                    resolution: (800.0, 600.0).into(),
-                    ..default()
-                }),
+        .add_plugins(DefaultPlugins.set(WindowPlugin {
+            primary_window: Some(Window {
+                title: "CS-style Multiplayer Client".into(),
+                resolution: (1024.0, 768.0).into(),
                 ..default()
-            }), // .set(LogPlugin {
-                //     level: Level::DEBUG, // миsнимальный уровень, который логируется
-                //     filter: "client::systems::send_input=debug,bevy_ecs=info".into(), // включаем твой модуль
-                //     ..default()
-                // }),
-        )
-        // системы
+            }),
+            ..default()
+        }))
         .add_plugins(QuinnetClientPlugin::default())
+        // состояния и меню
+        .insert_state(AppState::Menu)
+        .add_plugins(MenuPlugin)
+        // --- шрифты грузим заранее (нужны в меню тоже) ---
+        .add_systems(Startup, load_ui_font)
+        // --- Connecting: ждём первый снапшот и следим за таймаутом ---
         .add_systems(
-            Startup,
-            (setup, spawn_level_client, load_ui_font, setup_grenade_ui),
+            Update,
+            (connecting_pump, connection_timeout_system).run_if(in_state(AppState::Connecting)),
+        )
+        // сброс таймера при входе в игру
+        .add_systems(OnEnter(AppState::InGame), clear_connect_timeout)
+        // --- загрузка уровня и UI при входе в InGame ---
+        .add_systems(
+            OnEnter(AppState::InGame),
+            (setup, spawn_level_client, setup_grenade_ui),
+        )
+        // --- PreUpdate: сетка/инпут и приём сообщений только в InGame ---
+        .add_systems(
+            PreUpdate,
+            (send_input_and_predict, handle_connection_event)
+                .chain()
+                .run_if(in_state(AppState::InGame)),
         )
         .add_systems(
             PreUpdate,
-            (
-                send_input_and_predict,
-                handle_connection_event,
-                // receive_server_messages,
-            )
-                .chain(),
+            (receive_server_messages,).run_if(in_state(AppState::InGame)),
         )
-        .add_systems(PreUpdate, (receive_server_messages,))
+        // --- Update: вся игровая логика только в InGame ---
         .add_systems(
             Update,
             (
@@ -139,7 +150,8 @@ fn main() {
                 shoot_mouse,
                 send_ping,
             )
-                .chain(),
+                .chain()
+                .run_if(in_state(AppState::InGame)),
         )
         .add_systems(
             Update,
@@ -151,11 +163,13 @@ fn main() {
                 update_hp_text_from_event,
                 cleanup_hp_ui_on_player_remove,
                 corpse_lifecycle,
-            ),
+            )
+                .run_if(in_state(AppState::InGame)),
         )
+        // --- PostUpdate: кэш стен и финализация цветов тоже только в InGame ---
         .add_systems(
             PostUpdate,
-            (build_wall_aabb_cache, reconcile_local_and_colors),
+            (build_wall_aabb_cache, reconcile_local_and_colors).run_if(in_state(AppState::InGame)),
         )
         .run();
 }

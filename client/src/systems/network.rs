@@ -1,10 +1,12 @@
 use std::str::FromStr;
 
+use crate::app_state::AppState;
 use crate::components::{Corpse, GrenadeNet, LocalPlayer, PlayerMarker};
 use crate::constants::{BULLET_SPEED, BULLET_TTL};
 use crate::events::{
     GrenadeDetonatedEvent, GrenadeSpawnEvent, PlayerDamagedEvent, PlayerDied, PlayerLeftEvent,
 };
+use crate::menu::ConnectTimeout;
 use crate::resources::grenades::{GrenadeStates, NetState};
 use crate::resources::{
     ClientLatency, DeadPlayers, HpUiMap, LastKnownPos, MyPlayer, PendingInputsClient,
@@ -47,10 +49,16 @@ pub struct NetCtx<'w, 's> {
     pub grenade_states: ResMut<'w, GrenadeStates>, // сетевые снапы гранат
     pub wall_cache: Res<'w, WallAabbCache>,        // кэш стен (для трассеров)
     pub last_pos: Option<ResMut<'w, LastKnownPos>>, // если ввёл трупы (можно Option)
+    pub app_state: Res<'w, State<AppState>>,
+    pub next_state: ResMut<'w, NextState<AppState>>,
 }
 
-pub fn receive_server_messages(mut client: ResMut<QuinnetClient>, mut net: NetCtx) {
-    let conn = client.connection_mut();
+pub fn receive_server_messages(
+    mut client: ResMut<QuinnetClient>,
+    mut net: NetCtx,
+) {
+    // Безопасно: если дефолтного соединения нет — выходим.
+    let Some(conn) = client.get_connection_mut() else { return; };
 
     while let Some((chan, msg)) = conn.try_receive_message::<S2C>() {
         if chan != CH_S2C {
@@ -116,7 +124,13 @@ pub fn receive_server_messages(mut client: ResMut<QuinnetClient>, mut net: NetCt
                     }
                 }
 
-                // 5) Кладем в буфер (для интерполяции)
+                // Переход из Connecting в InGame только по первому снапу:
+                if matches!(net.app_state.get(), AppState::Connecting) {
+                    net.commands.remove_resource::<ConnectTimeout>();
+                    net.next_state.set(AppState::InGame);
+                }
+
+                // 5) Кладём в буфер (для интерполяции)
                 net.buffer.snapshots.push_back(snap);
                 while net.buffer.snapshots.len() > 120 {
                     net.buffer.snapshots.pop_front();
@@ -137,9 +151,7 @@ pub fn receive_server_messages(mut client: ResMut<QuinnetClient>, mut net: NetCt
                 let hit_dist = raycast_to_walls_cached(fx.from, dir, max_dist, &net.wall_cache.0);
 
                 // если стена прямо у дула — не спавним пулю
-                if hit_dist <= 0.5 {
-                    // info!("🔫 tracer blocked immediately");
-                } else {
+                if hit_dist > 0.5 {
                     // обрезаем трассер по стене: ttl = dist / speed
                     let ttl = hit_dist / BULLET_SPEED;
                     spawn_tracer(&mut net.commands, fx.from, dir, ttl);
@@ -344,7 +356,7 @@ fn spawn_player(
         // локальный (зелёный)
         commands.spawn((
             Sprite {
-                color: Color::srgba(0.0, 1.0, 0.0, 1.0), // ← жёстко sRGB зелёный
+                color: Color::srgba(0.0, 1.0, 0.0, 1.0), // sRGB зелёный
                 custom_size: Some(Vec2::splat(PLAYER_SIZE)),
                 ..default()
             },
@@ -352,14 +364,14 @@ fn spawn_player(
             GlobalTransform::default(),
             PlayerMarker(id),
             LocalPlayer,
-            Name::new(format!("Player[LOCAL] {id}")), // удобно смотреть в инспекторе/логах
+            Name::new(format!("Player[LOCAL] {id}")),
         ));
         info!("[Client]{from} spawn LOCAL {}", id);
     } else {
         // чужой (синий)
         commands.spawn((
             Sprite {
-                color: Color::srgba(0.0, 0.0, 1.0, 1.0), // ← жёстко sRGB синий
+                color: Color::srgba(0.0, 0.0, 1.0, 1.0), // sRGB синий
                 custom_size: Some(Vec2::splat(PLAYER_SIZE)),
                 ..default()
             },
@@ -368,7 +380,6 @@ fn spawn_player(
             PlayerMarker(id),
             Name::new(format!("Player[REMOTE] {id}")),
         ));
-        // лог фактического цвета сразу после спавна
         let c = Color::srgba(0.0, 0.0, 1.0, 1.0).to_srgba();
         info!(
             "[Client][{from}] spawn REMOTE {} color=({:.3},{:.3},{:.3},{:.3})",

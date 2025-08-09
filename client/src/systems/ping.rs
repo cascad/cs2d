@@ -17,7 +17,7 @@ pub fn send_ping(
             .send_message_on(CH_C2S, C2S::Ping(ts))
             .is_ok()
         {
-            info!("💓 Sent Ping at {:.3}", ts);
+            // info!("💓 Sent Ping at {:.3}", ts);
         }
     }
 }
