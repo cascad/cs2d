@@ -47,6 +47,11 @@ pub enum S2C {
         new_hp: i32,
         damage: i32,
     },
+    GrenadeDetonated {
+        id: u64,
+        pos: Vec2,
+    },
+    GrenadeSync { id: u64, pos: Vec2, vel: Vec2, ts: f64 }, // снапшот
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]

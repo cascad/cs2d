@@ -1,4 +1,5 @@
 use bevy::prelude::*;
+use protocol::messages::GrenadeEvent;
 
 /// Дискретное событие «игрок погиб»
 #[derive(Event)]
@@ -16,3 +17,12 @@ pub struct PlayerDamagedEvent {
 
 #[derive(Event)]
 pub struct PlayerLeftEvent(pub u64); // id игрока
+
+#[derive(Event, Debug, Clone)]
+pub struct GrenadeSpawnEvent(pub GrenadeEvent);
+
+#[derive(Event, Debug, Clone)]
+pub struct GrenadeDetonatedEvent {
+    pub id: u64,
+    pub pos: Vec2,
+}

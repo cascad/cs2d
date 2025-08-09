@@ -7,7 +7,8 @@ use crate::utils::{check_hit_lag_comp, push_history};
 use bevy::prelude::*;
 use bevy_quinnet::server::QuinnetServer;
 use protocol::constants::{
-    CH_C2S, CH_S2C, GRENADE_SPEED, GRENADE_TIMER, GRENADE_USAGE_COOLDOWN, SHOOT_RIFLE_DAMAGE,
+    CH_C2S, CH_S2C, GRENADE_RADIUS, GRENADE_SPEED, GRENADE_TIMER, GRENADE_USAGE_COOLDOWN,
+    SHOOT_RIFLE_DAMAGE,
 };
 use protocol::messages::{C2S, GrenadeEvent, S2C, ShootFx};
 
@@ -111,31 +112,48 @@ pub fn process_c2s_messages(
                     last_grenade.map.insert(client_id, now);
 
                     // Нормализуем присланный вектор (на всякий случай)
-                    let dir = ev.dir.normalize_or_zero();
+                    let mut dir = ev.dir;
+                    if dir.length_squared() <= f32::EPSILON {
+                        // мусорный ввод — игнорим
+                        continue;
+                    }
+                    dir = dir.normalize();
 
+                    // Смещаем точку спавна вперёд по направлению (радиус + небольшой запас),
+                    // чтобы не родиться впритык к стене/игроку
+                    let spawn_from = ev.from + dir * (GRENADE_RADIUS + 1.0);
+
+                    // Заводим серверное состояние
                     grenades.0.insert(
                         ev.id,
                         GrenadeState {
-                            ev: ev.clone(),
+                            ev: GrenadeEvent {
+                                id: ev.id,
+                                from: spawn_from,
+                                dir,             // нормализованный
+                                speed: ev.speed, // фактический из клиента (или оставь константу, если у тебя фикс)
+                                timer: ev.timer, // фактический из клиента
+                                timestamp: ev.timestamp,
+                            },
                             created: now,
+                            pos: spawn_from,
+                            vel: dir * ev.speed,
                         },
                     );
 
                     let grenade_id = ev.id;
                     // и рассылаем всем клиентам, чтобы они визуализировали гранату
-                    endpoint
-                        .broadcast_message_on(
-                            CH_S2C,
-                            S2C::GrenadeSpawn(GrenadeEvent {
-                                id: ev.id,
-                                from: ev.from,
-                                dir, // ← не Vec2::X, а нормализованный dir
-                                speed: GRENADE_SPEED,
-                                timer: GRENADE_TIMER,
-                                timestamp: ev.timestamp,
-                            }),
-                        )
-                        .unwrap();
+                    let _ = endpoint.broadcast_message_on(
+                        CH_S2C,
+                        S2C::GrenadeSpawn(GrenadeEvent {
+                            id: ev.id,
+                            from: spawn_from,
+                            dir,
+                            speed: ev.speed, // не подменяем на константу
+                            timer: ev.timer,
+                            timestamp: ev.timestamp,
+                        }),
+                    );
 
                     info!("💣 Клиент {} бросил гранату {}", client_id, grenade_id);
                 }

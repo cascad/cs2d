@@ -2,7 +2,7 @@ pub mod startup;
 pub mod process_c2s;
 pub mod server_tick;
 pub mod timeout;
-pub mod grenades;
+pub mod update_grenades;
 pub mod damage;
 pub mod connection;
 pub mod spawn;

@@ -1,8 +1,11 @@
 use std::str::FromStr;
 
-use crate::components::{Bullet, Grenade, LocalPlayer, PlayerMarker};
+use crate::components::{Bullet, GrenadeNet, LocalPlayer, PlayerMarker};
 use crate::constants::{BULLET_SPEED, BULLET_TTL};
-use crate::events::{PlayerDamagedEvent, PlayerDied, PlayerLeftEvent};
+use crate::events::{
+    GrenadeDetonatedEvent, GrenadeSpawnEvent, PlayerDamagedEvent, PlayerDied, PlayerLeftEvent,
+};
+use crate::resources::grenades::{GrenadeStates, NetState};
 use crate::resources::{
     ClientLatency, DeadPlayers, HpUiMap, MyPlayer, PendingInputsClient, SnapshotBuffer,
     SpawnedPlayers, TimeSync, UiFont,
@@ -10,7 +13,7 @@ use crate::resources::{
 use crate::systems::utils::{spawn_hp_ui, time_in_seconds};
 use bevy::prelude::*;
 use bevy_quinnet::client::QuinnetClient;
-use protocol::constants::{CH_S2C, GRENADE_BLAST_RADIUS, MOVE_SPEED, PLAYER_SIZE, TICK_DT};
+use protocol::constants::{CH_S2C, MOVE_SPEED, PLAYER_SIZE, TICK_DT};
 use protocol::messages::{InputState, S2C};
 
 pub fn receive_server_messages(
@@ -26,11 +29,22 @@ pub fn receive_server_messages(
     // todo fix q and query
     q_marker: Query<(Entity, &PlayerMarker)>,
     mut latency: ResMut<ClientLatency>,
-    mut ev_damage: EventWriter<PlayerDamagedEvent>,
+    // mut ev_damage: EventWriter<PlayerDamagedEvent>,
     mut hp_ui_map: ResMut<HpUiMap>,
-    mut ev_player_died: EventWriter<PlayerDied>,
-    mut ev_player_left: EventWriter<PlayerLeftEvent>,
+    // mut ev_player_died: EventWriter<PlayerDied>,
+    // mut ev_player_left: EventWriter<PlayerLeftEvent>,
+    // mut grenade_spawn_events: EventWriter<GrenadeSpawnEvent>,
     font: Res<UiFont>,
+    mut grenade_states: ResMut<GrenadeStates>,
+
+    // 🔽 четыре EventWriter-a свернули в один параметр
+    mut events: ParamSet<(
+        EventWriter<PlayerDamagedEvent>,    // p0
+        EventWriter<PlayerDied>,            // p1
+        EventWriter<PlayerLeftEvent>,       // p2
+        EventWriter<GrenadeSpawnEvent>,     // p3
+        EventWriter<GrenadeDetonatedEvent>, // p4
+    )>,
 ) {
     let conn = client.connection_mut();
 
@@ -162,7 +176,7 @@ pub fn receive_server_messages(
                     info!("🔌 PlayerLeft: игрок {} вышел — despawn", left_id);
                 }
 
-                ev_player_left.write(PlayerLeftEvent(left_id));
+                events.p2().write(PlayerLeftEvent(left_id));
             }
             // ===================================================
             // 2) ИГРОК ВЫШЕЛ 2 (event disconnect)
@@ -177,7 +191,7 @@ pub fn receive_server_messages(
                     info!("🔌 PlayerLeft: игрок {} вышел — despawn", id);
                 }
 
-                ev_player_left.write(PlayerLeftEvent(id));
+                events.p2().write(PlayerLeftEvent(id));
             }
             // ===================================================
             // 2) PONG
@@ -199,51 +213,41 @@ pub fn receive_server_messages(
             // ===================================================
             S2C::PlayerDamaged { id, new_hp, damage } => {
                 // println!("Игрок {id} получил {damage} урона, осталось {new_hp} HP");
-                ev_damage.write(PlayerDamagedEvent { id, new_hp, damage });
+                events.p0().write(PlayerDamagedEvent { id, new_hp, damage });
             }
             // ===================================================
-            // 2) Спавн гранаты
+            // Спавн гранаты
             // ===================================================
             S2C::GrenadeSpawn(ev) => {
-                // 1) создаём пустую сущность
-                let mut e = commands.spawn_empty();
+                let printable_ev = ev.clone();
+                events.p3().write(GrenadeSpawnEvent(ev));
 
-                // 2) базовые трансформы
-                e.insert(
-                    Transform::from_translation(ev.from.extend(0.0))
-                        .with_rotation(Quat::from_rotation_z(ev.dir.y.atan2(ev.dir.x))),
-                )
-                .insert(GlobalTransform::default());
-
-                // 3) спрайт‑квад: цвет + размер
-                e.insert(Sprite {
-                    color: Color::srgb(0.9, 0.15, 0.15),
-                    custom_size: Some(Vec2::splat(16.0)),
-                    ..default()
-                });
-
-                // 4) логика гранаты
-                e.insert(Grenade {
-                    dir: ev.dir,
-                    speed: ev.speed,
-                    timer: Timer::from_seconds(ev.timer, TimerMode::Once),
-                    blast_radius: GRENADE_BLAST_RADIUS,
-                });
-
-                info!("💣 GrenadeSpawn {}", ev.id);
+                info!("💣 GrenadeSpawn {}", printable_ev.id);
+            }
+            // ===================================================
+            // Снапшот гранаты (позиция/скорость)
+            // ===================================================
+            S2C::GrenadeSync { id, pos, vel, ts } => {
+                info!("SYNC GRENADES: {:?}", pos);
+                let e = grenade_states.0.entry(id).or_default();
+                *e = NetState {
+                    pos,
+                    vel,
+                    ts,
+                    has: true,
+                };
+            }
+            // ===================================================
+            // 2) Взрыв гранаты
+            // ===================================================
+            S2C::GrenadeDetonated { id, pos } => {
+                events.p4().write(GrenadeDetonatedEvent { id, pos });
             }
             // ===================================================
             // 2) СМЕРТЬ
             // ===================================================
             S2C::PlayerDied { victim, killer } => {
                 info!("[Client]   PlayerDied victim={}", victim);
-
-                // todo rm
-                // for (ent, hp_ui) in q_hp_ui.iter() {
-                //     if hp_ui.player_id == victim {
-                //         commands.entity(ent).despawn();
-                //     }
-                // }
 
                 // помечаем убитого «мертвым»
                 dead.0.insert(victim);
@@ -264,7 +268,7 @@ pub fn receive_server_messages(
                     spawned.0.remove(&victim);
                 }
 
-                ev_player_died.write(PlayerDied {
+                events.p1().write(PlayerDied {
                     victim: victim,
                     killer: killer,
                 });
@@ -333,5 +337,28 @@ fn spawn_player(
             PlayerMarker(id),
         ));
         info!("[Client][{from}] spawn REMOTE {}", id);
+    }
+}
+
+/// Применяем сетевое состояние к Transform гранат.
+/// Между снапшотами — лёгкая экстраполяция pos += vel * (now - ts)
+pub fn apply_grenade_net(
+    states: Res<GrenadeStates>,
+    time_sync: Res<TimeSync>,
+    mut q: Query<(&GrenadeNet, &mut Transform)>,
+) {
+    let now_server = time_in_seconds() - time_sync.offset; // серверные секунды
+    for (net, mut tf) in q.iter_mut() {
+        info!("apply id={} pos={:?}", net.id, tf.translation.truncate());
+
+        if let Some(s) = states.0.get(&net.id) {
+            if !s.has { continue; }
+            let mut dt = (now_server - s.ts) as f32;
+            if !time_sync.offset.is_finite() { dt = 0.0; }      // до первого Snapshot
+            dt = dt.clamp(0.0, 0.25);                           // анти-скачок
+            let pos = s.pos + s.vel * dt;
+            tf.translation.x = pos.x;
+            tf.translation.y = pos.y;
+        }
     }
 }

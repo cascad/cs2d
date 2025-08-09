@@ -6,15 +6,19 @@ mod resources;
 mod systems;
 mod utils;
 
-use bevy::{app::ctrlc, prelude::*};
+use bevy::{
+    app::ctrlc,
+    log::{Level, LogPlugin},
+    prelude::*,
+};
 use bevy_quinnet::server::{ConnectionEvent, ConnectionLostEvent, QuinnetServerPlugin};
 
 use constants::*;
 use events::*;
 use resources::*;
 use systems::{
-    connection::*, damage::*, grenades::*, process_c2s::*,
-    respawn_timers::*, server_tick::*, spawn::*, startup::*, timeout::*,
+    connection::*, damage::*, process_c2s::*, respawn_timers::*, server_tick::*, spawn::*,
+    startup::*, timeout::*, update_grenades::*,
 };
 
 use crate::systems::{spawn::process_player_respawn, wall::spawn_level_server};
@@ -53,7 +57,16 @@ fn main() {
         .insert_resource(ConnectedClients::default())
         .insert_resource(SpawnedClients::default())
         .insert_resource(LastGrenadeThrows::default())
-        .add_plugins(MinimalPlugins)
+        .insert_resource(GrenadeSyncTimer(Timer::from_seconds(0.1, TimerMode::Repeating))) // 10 Гц
+        .add_plugins((
+            MinimalPlugins, // базовый набор
+            LogPlugin {
+                // лог-плагин отдельно
+                level: Level::INFO,           // показываем info
+                filter: "server=info".into(), // или "" чтобы видеть всё
+                ..Default::default()
+            },
+        ))
         .add_plugins(QuinnetServerPlugin::default())
         .add_event::<ConnectionEvent>() // регистрируем событие в ECS
         .add_event::<ConnectionLostEvent>() // регистрируем событие в ECS
@@ -76,6 +89,7 @@ fn main() {
                 process_respawn_timers,
                 apply_damage,
                 update_grenades,
+                broadcast_grenade_syncs,
                 // handle_player_died,
                 // do_respawn,
                 // purge_deaths, // todo revert???

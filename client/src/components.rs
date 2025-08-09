@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use bevy::prelude::*;
 
 #[derive(Component)]
@@ -18,6 +20,8 @@ pub struct Health(pub i32);
 /// Компонент «летящая граната»
 #[derive(Component)]
 pub struct Grenade {
+    pub id: u64,
+    pub from: Vec2,
     /// Нормализованное направление полёта
     pub dir: Vec2,
     /// Скорость (пикселей в секунду)
@@ -33,4 +37,10 @@ pub struct Grenade {
 pub struct Explosion {
     /// Таймер длительности эффекта
     pub timer: Timer,
+}
+
+/// Компонент на визуальной гранате: связывает сущность с id гранаты на сервере
+#[derive(Component)]
+pub struct GrenadeNet {
+    pub id: u64,
 }

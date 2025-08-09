@@ -39,3 +39,14 @@ pub const WALL_THICKNESS: f32 = 40.0;
 pub const PLAYER_SIZE: f32 = 32.0;
 
 pub const TILE_SIZE: f32 = 32.0;
+
+pub const GRENADE_RADIUS: f32 = 8.0; // визуальный/физический радиус (клиент 16×16)
+
+pub const MAX_STEP: f32 = TILE_SIZE * 0.10; // тонкий подшаг, чтобы не перепрыгивать щели
+pub const SEPARATION_EPS: f32 = 0.5; // «волосок», чтобы не залипать после коррекции
+
+// Физика полёта / отскока (должны совпадать на клиенте и сервере)
+pub const GRENADE_AIR_DRAG_PER_SEC: f32 = 0.06; // 6%/сек экспоненциально
+pub const GRENADE_RESTITUTION: f32    = 0.8;    // упругость отражения
+pub const GRENADE_BOUNCE_DAMPING: f32 = 0.70;   // доп. гашение на ударе
+pub const GRENADE_STOP_SPEED: f32     = 30.0;   // ниже — считаем, что остановилась

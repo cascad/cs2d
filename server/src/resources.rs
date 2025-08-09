@@ -48,6 +48,8 @@ pub struct LastHeard(pub HashMap<u64, f64>); // client_id → time (secs)
 pub struct GrenadeState {
     pub ev: GrenadeEvent,
     pub created: f64,
+    pub pos: Vec2,
+    pub vel: Vec2,
 }
 
 #[derive(Resource, Default)]
@@ -81,3 +83,6 @@ pub struct SpawnedClients(pub HashSet<u64>);
 pub struct LastGrenadeThrows {
     pub map: HashMap<u64, f64>, // client_id → last throw time
 }
+
+#[derive(Resource, Default)]
+pub struct GrenadeSyncTimer(pub Timer);

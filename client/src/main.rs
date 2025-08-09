@@ -20,20 +20,31 @@ use protocol::constants::TICK_DT;
 // Подмодули
 use resources::*;
 use systems::{
-    bullet_lifecycle::bullet_lifecycle, connection::handle_connection_event,
-    grenade_lifecycle::explosion_lifecycle, grenade_lifecycle::grenade_lifecycle,
-    grenade_throw::grenade_throw, input::change_stance,
-    interpolate_with_snapshot::interpolate_with_snapshot, network::receive_server_messages,
-    ping::send_ping, rotate_to_cursor::rotate_to_cursor, send_input::send_input_and_predict,
-    shoot::shoot_mouse, startup::setup,
+    bullet_lifecycle::bullet_lifecycle,
+    connection::handle_connection_event,
+    grenade_lifecycle::explosion_lifecycle, // grenade_lifecycle::grenade_lifecycle,
+    grenade_throw::grenade_throw,
+    input::change_stance,
+    interpolate_with_snapshot::interpolate_with_snapshot,
+    network::receive_server_messages,
+    ping::send_ping,
+    rotate_to_cursor::rotate_to_cursor,
+    send_input::send_input_and_predict,
+    shoot::shoot_mouse,
+    startup::setup,
 };
 use ui::update_grenade_cooldown_ui::update_grenade_cooldown_ui;
 
 use crate::{
-    events::{PlayerDamagedEvent, PlayerDied, PlayerLeftEvent},
-    resources::grenades::GrenadeCooldown,
+    events::{
+        GrenadeDetonatedEvent, GrenadeSpawnEvent, PlayerDamagedEvent, PlayerDied, PlayerLeftEvent,
+    },
+    resources::grenades::{ClientGrenades, GrenadeCooldown, GrenadeStates},
     systems::{
-        level::{fill_solid_tiles_once, spawn_level},
+        grenade_lifecycle::spawn_grenades,
+        level::{fill_solid_tiles_once, spawn_level_client},
+        network::apply_grenade_net,
+        render_detonations::render_detonations,
         spawn_damage_popups::{spawn_damage_popups, update_damage_popups},
         startup::load_ui_font,
         sync_hp_ui::{
@@ -66,10 +77,14 @@ fn main() {
         .insert_resource(GrenadeCooldown::default())
         .insert_resource(HpUiMap::default())
         .insert_resource(SolidTiles::default())
+        .insert_resource(ClientGrenades::default())
+        .insert_resource(GrenadeStates::default())
         // ивенты
         .add_event::<PlayerDamagedEvent>()
         .add_event::<PlayerDied>()
         .add_event::<PlayerLeftEvent>()
+        .add_event::<GrenadeSpawnEvent>()
+        .add_event::<GrenadeDetonatedEvent>()
         // плагины
         .add_plugins(
             DefaultPlugins.set(WindowPlugin {
@@ -89,24 +104,29 @@ fn main() {
         .add_plugins(QuinnetClientPlugin::default())
         .add_systems(
             Startup,
-            (setup, spawn_level, load_ui_font, setup_grenade_ui),
+            (setup, spawn_level_client, load_ui_font, setup_grenade_ui),
         )
         .add_systems(
             PreUpdate,
             (
                 send_input_and_predict,
                 handle_connection_event,
-                receive_server_messages,
+                // receive_server_messages,
             )
                 .chain(),
         )
+        .add_systems(PreUpdate, (receive_server_messages,))
         .add_systems(
             Update,
             (
                 fill_solid_tiles_once,
                 interpolate_with_snapshot,
                 bullet_lifecycle,
-                grenade_lifecycle,
+                // grenades
+                spawn_grenades,
+                apply_grenade_net,
+                render_detonations,
+                // 
                 explosion_lifecycle,
                 grenade_throw,
                 rotate_to_cursor,
