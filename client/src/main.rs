@@ -35,7 +35,8 @@ use systems::{
 use ui::update_grenade_cooldown_ui::update_grenade_cooldown_ui;
 
 use crate::{
-    app_state::AppState, // enum AppState { Menu, Connecting, InGame }
+    app_state::AppState,
+    components::PlayerMarker,
     events::{
         GrenadeDetonatedEvent, GrenadeSpawnEvent, PlayerDamagedEvent, PlayerDied, PlayerLeftEvent,
     },
@@ -45,6 +46,7 @@ use crate::{
         // +++ насос Connecting: ждём первый Snapshot, затем -> InGame +++
         connecting_pump::connecting_pump,
         corpse_lc::corpse_lifecycle,
+        ensure_my_id::ensure_my_id_from_conn,
         grenade_lifecycle::spawn_grenades,
         level::{fill_solid_tiles_once, spawn_level_client},
         network::apply_grenade_net,
@@ -55,6 +57,7 @@ use crate::{
         sync_hp_ui::{
             cleanup_hp_ui_on_player_remove, sync_hp_ui_position, update_hp_text_from_event,
         },
+        sync_local::sync_local_and_tint,
         walls_cache::build_wall_aabb_cache,
     },
     ui::grenade_ui::setup_grenade_ui,
@@ -129,7 +132,9 @@ fn main() {
         )
         .add_systems(
             PreUpdate,
-            (receive_server_messages,).run_if(in_state(AppState::InGame)),
+            (ensure_my_id_from_conn, receive_server_messages)
+                .chain()
+                .run_if(in_state(AppState::InGame)),
         )
         // --- Update: вся игровая логика только в InGame ---
         .add_systems(
@@ -169,7 +174,33 @@ fn main() {
         // --- PostUpdate: кэш стен и финализация цветов тоже только в InGame ---
         .add_systems(
             PostUpdate,
-            (build_wall_aabb_cache, reconcile_local_and_colors).run_if(in_state(AppState::InGame)),
+            (
+                build_wall_aabb_cache,
+                // ensure_localplayer_after_id_set,
+                // reconcile_local_and_colors,
+            )
+                .run_if(in_state(AppState::InGame)),
         )
+        // .add_systems(
+        //     PostUpdate,
+        //     sync_local_and_tint
+        //         .run_if(in_state(AppState::InGame))
+        //         .run_if(resource_changed::<MyPlayer>),
+        // )
+        // // А чтобы гарантированно сработало и при спавне игроков из снапшота — второй запуск,
+        // // но только когда реально были добавления/изменения компонентов в кадре:
+        // .add_systems(
+        //     PostUpdate,
+        //     sync_local_and_tint
+        //         .run_if(in_state(AppState::InGame))
+        //         .run_if(any_with_component_added::<PlayerMarker>), // helper ниже
+        // )
         .run();
+}
+
+fn any_with_component_added<T: Component>(world: &World) -> bool {
+    // дешёвый признак: есть ли в мире недавно добавленные T
+    // В 0.16 прямого API нет, используем эвристически: запускаем sync на входе InGame и при MyPlayer change.
+    // Если хочешь жёстче — просто оставь два вызова sync: на MyPlayer change и OnEnter(InGame).
+    false
 }

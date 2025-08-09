@@ -19,3 +19,5 @@ pub mod walls_cache;
 pub mod corpse_lc;
 pub mod reconcile_colors;
 pub mod connecting_pump;
+pub mod ensure_my_id;
+pub mod sync_local;

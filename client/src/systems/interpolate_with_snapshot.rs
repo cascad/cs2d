@@ -49,7 +49,8 @@ pub fn interpolate_with_snapshot(
             let to = Vec2::new(p1.x, p1.y);
             t.translation = from.lerp(to, alpha).extend(0.0);
             t.rotation = Quat::from_rotation_z(lerp_angle(p0.rotation, p1.rotation, alpha));
-            s.color = stance_color(&p1.stance);
+            // todo need for stance texture, change here
+            // s.color = stance_color(&p1.stance);
         }
     }
 }
