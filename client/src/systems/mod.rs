@@ -16,3 +16,5 @@ pub mod sync_hp_ui;
 pub mod level;
 pub mod render_detonations;
 pub mod walls_cache;
+pub mod corpse_lc;
+pub mod reconcile_colors;

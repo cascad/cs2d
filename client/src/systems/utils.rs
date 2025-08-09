@@ -119,7 +119,12 @@ pub fn raycast_to_walls(
     }
 }
 
-pub fn raycast_to_walls_cached(origin: Vec2, dir: Vec2, max_dist: f32, cache: &[(Vec2, Vec2)]) -> f32 {
+pub fn raycast_to_walls_cached(
+    origin: Vec2,
+    dir: Vec2,
+    max_dist: f32,
+    cache: &[(Vec2, Vec2)],
+) -> f32 {
     let end = origin + dir * max_dist;
     let mut best: Option<f32> = None;
 
@@ -128,22 +133,36 @@ pub fn raycast_to_walls_cached(origin: Vec2, dir: Vec2, max_dist: f32, cache: &[
         let d = p1 - p0;
         let (mut t0, mut t1) = (0.0f32, 1.0f32);
         if d.x.abs() < f32::EPSILON {
-            if p0.x < min.x || p0.x > max.x { return None; }
+            if p0.x < min.x || p0.x > max.x {
+                return None;
+            }
         } else {
             let inv = 1.0 / d.x;
             let (mut tmin, mut tmax) = ((min.x - p0.x) * inv, (max.x - p0.x) * inv);
-            if tmin > tmax { core::mem::swap(&mut tmin, &mut tmax); }
-            t0 = t0.max(tmin); t1 = t1.min(tmax);
-            if t0 > t1 { return None; }
+            if tmin > tmax {
+                core::mem::swap(&mut tmin, &mut tmax);
+            }
+            t0 = t0.max(tmin);
+            t1 = t1.min(tmax);
+            if t0 > t1 {
+                return None;
+            }
         }
         if d.y.abs() < f32::EPSILON {
-            if p0.y < min.y || p0.y > max.y { return None; }
+            if p0.y < min.y || p0.y > max.y {
+                return None;
+            }
         } else {
             let inv = 1.0 / d.y;
             let (mut tmin, mut tmax) = ((min.y - p0.y) * inv, (max.y - p0.y) * inv);
-            if tmin > tmax { core::mem::swap(&mut tmin, &mut tmax); }
-            t0 = t0.max(tmin); t1 = t1.min(tmax);
-            if t0 > t1 { return None; }
+            if tmin > tmax {
+                core::mem::swap(&mut tmin, &mut tmax);
+            }
+            t0 = t0.max(tmin);
+            t1 = t1.min(tmax);
+            if t0 > t1 {
+                return None;
+            }
         }
         Some(t0.clamp(0.0, 1.0))
     }

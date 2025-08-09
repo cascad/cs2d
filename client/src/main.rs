@@ -41,6 +41,7 @@ use crate::{
     },
     resources::grenades::{ClientGrenades, GrenadeCooldown, GrenadeStates},
     systems::{
+        corpse_lc::corpse_lifecycle,
         grenade_lifecycle::spawn_grenades,
         level::{fill_solid_tiles_once, spawn_level_client},
         network::apply_grenade_net,
@@ -50,6 +51,7 @@ use crate::{
         sync_hp_ui::{
             cleanup_hp_ui_on_player_remove, sync_hp_ui_position, update_hp_text_from_event,
         },
+        reconcile_colors::{debug_player_colors_on_added, reconcile_local_and_colors},
         walls_cache::build_wall_aabb_cache,
     },
     ui::grenade_ui::setup_grenade_ui,
@@ -81,6 +83,7 @@ fn main() {
         .insert_resource(ClientGrenades::default())
         .insert_resource(GrenadeStates::default())
         .insert_resource(WallAabbCache::default())
+        .insert_resource(LastKnownPos::default())
         // ивенты
         .add_event::<PlayerDamagedEvent>()
         .add_event::<PlayerDied>()
@@ -147,8 +150,12 @@ fn main() {
                 sync_hp_ui_position,
                 update_hp_text_from_event,
                 cleanup_hp_ui_on_player_remove,
+                corpse_lifecycle,
             ),
         )
-        .add_systems(PostUpdate, (build_wall_aabb_cache,))
+        .add_systems(
+            PostUpdate,
+            (build_wall_aabb_cache, reconcile_local_and_colors),
+        )
         .run();
 }

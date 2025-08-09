@@ -44,3 +44,8 @@ pub struct Explosion {
 pub struct GrenadeNet {
     pub id: u64,
 }
+
+#[derive(Component)]
+pub struct Corpse {
+    pub timer: Timer, // сколько лежит труп
+}

@@ -76,7 +76,7 @@ pub fn shoot_mouse(
     // spawn_tracer(&mut commands, player_pos, dir);
 }
 
-fn spawn_tracer(commands: &mut Commands, from: Vec2, dir: Vec2) {
+pub fn spawn_tracer(commands: &mut Commands, from: Vec2, dir: Vec2, ttl:f32) {
     commands.spawn((
         Sprite {
             color: Color::WHITE,
@@ -87,7 +87,7 @@ fn spawn_tracer(commands: &mut Commands, from: Vec2, dir: Vec2) {
             .with_rotation(Quat::from_rotation_z(dir.y.atan2(dir.x))),
         GlobalTransform::default(),
         Bullet {
-            ttl: BULLET_TTL,
+            ttl: ttl,
             vel: dir * BULLET_SPEED,
         },
     ));

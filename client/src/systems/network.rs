@@ -1,62 +1,61 @@
 use std::str::FromStr;
 
-use crate::components::{Bullet, GrenadeNet, LocalPlayer, PlayerMarker};
+use crate::components::{Corpse, GrenadeNet, LocalPlayer, PlayerMarker};
 use crate::constants::{BULLET_SPEED, BULLET_TTL};
 use crate::events::{
     GrenadeDetonatedEvent, GrenadeSpawnEvent, PlayerDamagedEvent, PlayerDied, PlayerLeftEvent,
 };
 use crate::resources::grenades::{GrenadeStates, NetState};
 use crate::resources::{
-    ClientLatency, DeadPlayers, HpUiMap, MyPlayer, PendingInputsClient, SnapshotBuffer,
-    SpawnedPlayers, TimeSync, UiFont, WallAabbCache,
+    ClientLatency, DeadPlayers, HpUiMap, LastKnownPos, MyPlayer, PendingInputsClient,
+    SnapshotBuffer, SpawnedPlayers, TimeSync, UiFont, WallAabbCache,
 };
-use crate::systems::level::Wall;
-use crate::systems::utils::{
-    raycast_to_walls, raycast_to_walls_cached, spawn_hp_ui, time_in_seconds,
-};
+use crate::systems::shoot::spawn_tracer;
+use crate::systems::utils::{raycast_to_walls_cached, spawn_hp_ui, time_in_seconds};
+use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use bevy_quinnet::client::QuinnetClient;
 use protocol::constants::{CH_S2C, MOVE_SPEED, PLAYER_SIZE, TICK_DT};
 use protocol::messages::{InputState, S2C};
 
-pub fn receive_server_messages(
-    mut client: ResMut<QuinnetClient>,
-    mut commands: Commands,
-    mut buffer: ResMut<SnapshotBuffer>,
-    mut time_sync: ResMut<TimeSync>,
-    mut my: ResMut<MyPlayer>,
-    mut pending: ResMut<PendingInputsClient>,
-    mut q_local: Query<&mut Transform, With<LocalPlayer>>,
-    mut spawned: ResMut<SpawnedPlayers>,
-    mut dead: ResMut<DeadPlayers>,
-    // todo fix q and query
-    q_marker: Query<(Entity, &PlayerMarker)>,
-    mut latency: ResMut<ClientLatency>,
-    // mut ev_damage: EventWriter<PlayerDamagedEvent>,
-    mut hp_ui_map: ResMut<HpUiMap>,
-    // mut ev_player_died: EventWriter<PlayerDied>,
-    // mut ev_player_left: EventWriter<PlayerLeftEvent>,
-    // mut grenade_spawn_events: EventWriter<GrenadeSpawnEvent>,
-    font: Res<UiFont>,
-    mut grenade_states: ResMut<GrenadeStates>,
-    wall_cache: Res<WallAabbCache>,
+#[derive(SystemParam)]
+pub struct NetCtx<'w, 's> {
+    pub commands: Commands<'w, 's>,
 
-    // 🔽 четыре EventWriter-a свернули в один параметр
-    mut events: ParamSet<(
-        EventWriter<PlayerDamagedEvent>,    // p0
-        EventWriter<PlayerDied>,            // p1
-        EventWriter<PlayerLeftEvent>,       // p2
-        EventWriter<GrenadeSpawnEvent>,     // p3
-        EventWriter<GrenadeDetonatedEvent>, // p4
-    )>,
-) {
+    pub buffer: ResMut<'w, SnapshotBuffer>,
+    pub time_sync: ResMut<'w, TimeSync>,
+    pub my: ResMut<'w, MyPlayer>,
+    pub pending: ResMut<'w, PendingInputsClient>,
+    pub spawned: ResMut<'w, SpawnedPlayers>,
+    pub dead: ResMut<'w, DeadPlayers>,
+    pub latency: ResMut<'w, ClientLatency>,
+    pub hp_ui_map: ResMut<'w, HpUiMap>,
+
+    pub q_local: Query<'w, 's, &'static mut Transform, With<LocalPlayer>>,
+    pub q_marker: Query<'w, 's, (Entity, &'static PlayerMarker)>,
+
+    pub font: Res<'w, UiFont>,
+
+    // события отдельно, без ParamSet — так проще
+    pub ev_damage: EventWriter<'w, PlayerDamagedEvent>,
+    pub ev_died: EventWriter<'w, PlayerDied>,
+    pub ev_left: EventWriter<'w, PlayerLeftEvent>,
+    pub ev_grenade_spawn: EventWriter<'w, GrenadeSpawnEvent>,
+    pub ev_grenade_detonated: EventWriter<'w, GrenadeDetonatedEvent>,
+
+    // то, что добавляли недавно
+    pub grenade_states: ResMut<'w, GrenadeStates>, // сетевые снапы гранат
+    pub wall_cache: Res<'w, WallAabbCache>,        // кэш стен (для трассеров)
+    pub last_pos: Option<ResMut<'w, LastKnownPos>>, // если ввёл трупы (можно Option)
+}
+
+pub fn receive_server_messages(mut client: ResMut<QuinnetClient>, mut net: NetCtx) {
     let conn = client.connection_mut();
 
     while let Some((chan, msg)) = conn.try_receive_message::<S2C>() {
         if chan != CH_S2C {
             continue;
         }
-        // info!("[Client] ← got {:?} on channel {}", msg, chan);
         match msg {
             // ===================================================
             // 1) СНАПШОТ
@@ -65,28 +64,28 @@ pub fn receive_server_messages(
                 let now_client = time_in_seconds();
 
                 // 1) Time sync — один раз, на пустом буфере
-                if buffer.snapshots.is_empty() {
-                    time_sync.offset = now_client - snap.server_time;
-                    info!("[Network] time sync offset = {:.3}", time_sync.offset);
+                if net.buffer.snapshots.is_empty() {
+                    net.time_sync.offset = now_client - snap.server_time;
+                    info!("[Network] time sync offset = {:.3}", net.time_sync.offset);
                 }
 
                 // 2) Reconciliation локального игрока
-                if let Ok(mut t) = q_local.single_mut() {
-                    if let Some(ack) = snap.last_input_seq.get(&my.id) {
-                        if let Some(ps) = snap.players.iter().find(|p| p.id == my.id) {
+                if let Ok(mut t) = net.q_local.single_mut() {
+                    if let Some(ack) = snap.last_input_seq.get(&net.my.id) {
+                        if let Some(ps) = snap.players.iter().find(|p| p.id == net.my.id) {
                             // сброс позы до серверной
                             t.translation = Vec3::new(ps.x, ps.y, t.translation.z);
                             t.rotation = Quat::from_rotation_z(ps.rotation);
                             // чистим подтверждённые инпуты
-                            while let Some(front) = pending.0.front() {
+                            while let Some(front) = net.pending.0.front() {
                                 if front.seq <= *ack {
-                                    pending.0.pop_front();
+                                    net.pending.0.pop_front();
                                 } else {
                                     break;
                                 }
                             }
-                            // re‑simulate оставшиеся
-                            for inp in pending.0.iter() {
+                            // re-simulate оставшиеся
+                            for inp in net.pending.0.iter() {
                                 simulate_input(&mut *t, inp);
                             }
                         }
@@ -97,59 +96,45 @@ pub fn receive_server_messages(
                 for p in &snap.players {
                     let id = p.id;
 
-                    if dead.0.contains(&id) {
-                        // если помечен мёртвым — пропускаем
+                    if net.dead.0.contains(&id) {
                         continue;
                     }
 
-                    if spawned.0.insert(p.id) {
+                    if net.spawned.0.insert(p.id) {
                         let label = String::from_str("snapshot").unwrap();
-                        spawn_player(&mut commands, &my, id, p.x, p.y, p.rotation, label);
+                        spawn_player(&mut net.commands, &net.my, id, p.x, p.y, p.rotation, label);
                     }
 
-                    if !hp_ui_map.0.contains_key(&p.id) {
-                        let entity = spawn_hp_ui(&mut commands, p.id, p.hp as u32, font.0.clone());
-                        hp_ui_map.0.insert(p.id, entity);
+                    if !net.hp_ui_map.0.contains_key(&p.id) {
+                        let entity =
+                            spawn_hp_ui(&mut net.commands, p.id, p.hp as u32, net.font.0.clone());
+                        net.hp_ui_map.0.insert(p.id, entity);
+                    }
+
+                    if let Some(last_pos) = net.last_pos.as_deref_mut() {
+                        last_pos.0.insert(p.id, (Vec2::new(p.x, p.y), p.rotation));
                     }
                 }
 
                 // 5) Кладем в буфер (для интерполяции)
-                buffer.snapshots.push_back(snap);
-                while buffer.snapshots.len() > 120 {
-                    buffer.snapshots.pop_front();
+                net.buffer.snapshots.push_back(snap);
+                while net.buffer.snapshots.len() > 120 {
+                    net.buffer.snapshots.pop_front();
                 }
             }
+
             // ===================================================
             // 2) СТРЕЛЬБА
             // ===================================================
-            // S2C::ShootFx(fx) => {
-            //     println!("💥 [Client] got FX from {} at {:?}", fx.shooter_id, fx.from);
-            //     if fx.shooter_id != my.id {
-            //         commands.spawn((
-            //             Sprite {
-            //                 color: Color::WHITE,
-            //                 custom_size: Some(Vec2::new(12.0, 2.0)),
-            //                 ..default()
-            //             },
-            //             Transform::from_translation(fx.from.extend(10.0))
-            //                 .with_rotation(Quat::from_rotation_z(fx.dir.y.atan2(fx.dir.x))),
-            //             GlobalTransform::default(),
-            //             Bullet {
-            //                 ttl: BULLET_TTL,
-            //                 vel: fx.dir * BULLET_SPEED,
-            //             },
-            //         ));
-            //     }
-            // }
             S2C::ShootFx(fx) => {
-                // рисуем только чужие трассеры
-                // if fx.shooter_id != my.id {
+                info!("💥 [Client] got FX from {} at {:?}", fx.shooter_id, fx.from);
+
                 // макс. дальность = скорость * ttl
                 let max_dist = BULLET_SPEED * BULLET_TTL;
                 let dir = fx.dir.normalize_or_zero();
 
                 // расстояние до первой стены; берём из кэша AABB
-                let hit_dist = raycast_to_walls_cached(fx.from, dir, max_dist, &wall_cache.0);
+                let hit_dist = raycast_to_walls_cached(fx.from, dir, max_dist, &net.wall_cache.0);
 
                 // если стена прямо у дула — не спавним пулю
                 if hit_dist <= 0.5 {
@@ -157,80 +142,72 @@ pub fn receive_server_messages(
                 } else {
                     // обрезаем трассер по стене: ttl = dist / speed
                     let ttl = hit_dist / BULLET_SPEED;
-
-                    commands.spawn((
-                        Sprite {
-                            color: Color::WHITE,
-                            custom_size: Some(Vec2::new(12.0, 2.0)),
-                            ..default()
-                        },
-                        Transform::from_translation(fx.from.extend(10.0))
-                            .with_rotation(Quat::from_rotation_z(dir.y.atan2(dir.x))),
-                        GlobalTransform::default(),
-                        Bullet {
-                            ttl,
-                            vel: dir * BULLET_SPEED,
-                        },
-                    ));
+                    spawn_tracer(&mut net.commands, fx.from, dir, ttl);
                 }
-                // }
             }
+
             // ===================================================
             // 2) СПАВН ИГРОКА (новый или респавн)
             // ===================================================
             S2C::PlayerConnected { id, x, y } | S2C::PlayerRespawn { id, x, y } => {
-                dead.0.remove(&id);
+                net.dead.0.remove(&id);
 
                 // сброс буфера снапшотов → сразу телепорт, без интерполяции
-                buffer.snapshots.clear();
+                net.buffer.snapshots.clear();
 
                 // 1) Если этот id уже есть — деспавним старую сущность
-                if spawned.0.remove(&id) {
-                    for (ent, marker) in q_marker.iter() {
+                if net.spawned.0.remove(&id) {
+                    for (ent, marker) in net.q_marker.iter() {
                         if marker.0 == id {
-                            commands.entity(ent).despawn();
+                            net.commands.entity(ent).despawn();
                             break;
                         }
                     }
                 }
 
-                // spawn_hp_ui(&mut commands, id, 100, font.0.clone());
-
+                let rotation = 0.0;
                 let label = String::from_str("new/respawn").unwrap();
-                spawn_player(&mut commands, &my, id, x, y, 0.0, label);
+                spawn_player(&mut net.commands, &net.my, id, x, y, rotation, label);
 
-                spawned.0.insert(id);
+                net.spawned.0.insert(id);
+
+                if let Some(last_pos) = net.last_pos.as_deref_mut() {
+                    last_pos.0.insert(id, (Vec2::new(x, y), rotation));
+                }
             }
+
             // ===================================================
             // 2) ИГРОК ВЫШЕЛ
             // ===================================================
             S2C::PlayerLeft(left_id) => {
-                dead.0.remove(&left_id);
+                net.dead.0.remove(&left_id);
 
-                if let Some((entity, _)) = q_marker.iter().find(|(_, marker)| marker.0 == left_id) {
-                    // 1) сразу удаляем сущность
-                    commands.entity(entity).despawn();
-                    spawned.0.remove(&left_id);
+                if let Some((entity, _)) =
+                    net.q_marker.iter().find(|(_, marker)| marker.0 == left_id)
+                {
+                    net.commands.entity(entity).despawn();
+                    net.spawned.0.remove(&left_id);
                     info!("🔌 PlayerLeft: игрок {} вышел — despawn", left_id);
                 }
 
-                events.p2().write(PlayerLeftEvent(left_id));
+                net.ev_left.write(PlayerLeftEvent(left_id));
             }
+
             // ===================================================
             // 2) ИГРОК ВЫШЕЛ 2 (event disconnect)
             // ===================================================
             S2C::PlayerDisconnected { id } => {
-                dead.0.remove(&id);
+                net.dead.0.remove(&id);
 
-                if let Some((entity, _)) = q_marker.iter().find(|(_, marker)| marker.0 == id) {
-                    // 1) сразу удаляем сущность
-                    commands.entity(entity).despawn();
-                    spawned.0.remove(&id);
+                if let Some((entity, _)) = net.q_marker.iter().find(|(_, marker)| marker.0 == id) {
+                    net.commands.entity(entity).despawn();
+                    net.spawned.0.remove(&id);
                     info!("🔌 PlayerLeft: игрок {} вышел — despawn", id);
                 }
 
-                events.p2().write(PlayerLeftEvent(id));
+                net.ev_left.write(PlayerLeftEvent(id));
             }
+
             // ===================================================
             // 2) PONG
             // ===================================================
@@ -241,33 +218,33 @@ pub fn receive_server_messages(
                 let now = time_in_seconds();
                 let rtt = now - client_time;
                 let one_way = (rtt - (now - server_time)) * 0.5;
-                latency.rtt = rtt;
-                latency.offset = server_time - (client_time + one_way);
-                // todo revert
-                // info!("💓 Pong: RTT={:.3}s, offset={:.3}s", rtt, latency.offset);
+                net.latency.rtt = rtt;
+                net.latency.offset = server_time - (client_time + one_way);
             }
+
             // ===================================================
             // 2) УРОН НАНЕСЕН
             // ===================================================
             S2C::PlayerDamaged { id, new_hp, damage } => {
-                // println!("Игрок {id} получил {damage} урона, осталось {new_hp} HP");
-                events.p0().write(PlayerDamagedEvent { id, new_hp, damage });
+                net.ev_damage
+                    .write(PlayerDamagedEvent { id, new_hp, damage });
             }
+
             // ===================================================
             // Спавн гранаты
             // ===================================================
             S2C::GrenadeSpawn(ev) => {
                 let printable_ev = ev.clone();
-                events.p3().write(GrenadeSpawnEvent(ev));
-
+                net.ev_grenade_spawn.write(GrenadeSpawnEvent(ev));
                 info!("💣 GrenadeSpawn {}", printable_ev.id);
             }
+
             // ===================================================
             // Снапшот гранаты (позиция/скорость)
             // ===================================================
             S2C::GrenadeSync { id, pos, vel, ts } => {
                 info!("SYNC GRENADES: {:?}", pos);
-                let e = grenade_states.0.entry(id).or_default();
+                let e = net.grenade_states.0.entry(id).or_default();
                 *e = NetState {
                     pos,
                     vel,
@@ -275,42 +252,58 @@ pub fn receive_server_messages(
                     has: true,
                 };
             }
+
             // ===================================================
             // 2) Взрыв гранаты
             // ===================================================
             S2C::GrenadeDetonated { id, pos } => {
-                events.p4().write(GrenadeDetonatedEvent { id, pos });
+                net.ev_grenade_detonated
+                    .write(GrenadeDetonatedEvent { id, pos });
             }
+
             // ===================================================
             // 2) СМЕРТЬ
             // ===================================================
             S2C::PlayerDied { victim, killer } => {
                 info!("[Client]   PlayerDied victim={}", victim);
 
+                // координаты и поворот из последнего снапшота (если нет — скипаем труп)
+                if let Some(last_pos) = net.last_pos.as_ref() {
+                    if let Some((pos, rot)) = last_pos.0.get(&victim).cloned() {
+                        net.commands.spawn((
+                            Sprite {
+                                color: Color::srgba(0.6, 0.15, 0.15, 1.0),
+                                custom_size: Some(Vec2::splat(PLAYER_SIZE)),
+                                ..default()
+                            },
+                            Transform::from_xyz(pos.x, pos.y, -0.1)
+                                .with_rotation(Quat::from_rotation_z(rot)),
+                            GlobalTransform::default(),
+                            Corpse {
+                                timer: Timer::from_seconds(8.0, TimerMode::Once),
+                            },
+                        ));
+                    }
+                }
+
                 // помечаем убитого «мертвым»
-                dead.0.insert(victim);
+                net.dead.0.insert(victim);
 
                 // если это мы — despawn своего спрайта
-                if victim == my.id {
-                    for (ent, _) in q_marker.iter().filter(|(_, m)| m.0 == victim) {
-                        commands.entity(ent).despawn();
-                        spawned.0.remove(&victim);
+                if victim == net.my.id {
+                    for (ent, _) in net.q_marker.iter().filter(|(_, m)| m.0 == victim) {
+                        net.commands.entity(ent).despawn();
+                        net.spawned.0.remove(&victim);
                     }
-                    // 2) сбрасываем все старые снапшоты, чтобы не воскрешать
-                    buffer.snapshots.clear();
-                    // можно показать UI‑фразу или эффект «вы умерли»
+                    net.buffer.snapshots.clear();
                 }
-                // если это кто‑то другой — despawn его квадрат
-                else if let Some((ent, _)) = q_marker.iter().find(|(_, m)| m.0 == victim) {
-                    commands.entity(ent).despawn();
-                    spawned.0.remove(&victim);
+                // если это кто-то другой — despawn его квадрат
+                else if let Some((ent, _)) = net.q_marker.iter().find(|(_, m)| m.0 == victim) {
+                    net.commands.entity(ent).despawn();
+                    net.spawned.0.remove(&victim);
                 }
 
-                events.p1().write(PlayerDied {
-                    victim: victim,
-                    killer: killer,
-                });
-
+                net.ev_died.write(PlayerDied { victim, killer });
                 info!("💀 Игрок {} погиб ({:?})", victim, killer);
             }
         }
@@ -351,7 +344,7 @@ fn spawn_player(
         // локальный (зелёный)
         commands.spawn((
             Sprite {
-                color: Color::srgb(0.0, 1.0, 0.0),
+                color: Color::srgba(0.0, 1.0, 0.0, 1.0), // ← жёстко sRGB зелёный
                 custom_size: Some(Vec2::splat(PLAYER_SIZE)),
                 ..default()
             },
@@ -359,22 +352,28 @@ fn spawn_player(
             GlobalTransform::default(),
             PlayerMarker(id),
             LocalPlayer,
+            Name::new(format!("Player[LOCAL] {id}")), // удобно смотреть в инспекторе/логах
         ));
-
         info!("[Client]{from} spawn LOCAL {}", id);
     } else {
         // чужой (синий)
         commands.spawn((
             Sprite {
-                color: Color::srgb(0.2, 0.4, 1.0),
+                color: Color::srgba(0.0, 0.0, 1.0, 1.0), // ← жёстко sRGB синий
                 custom_size: Some(Vec2::splat(PLAYER_SIZE)),
                 ..default()
             },
             tf,
             GlobalTransform::default(),
             PlayerMarker(id),
+            Name::new(format!("Player[REMOTE] {id}")),
         ));
-        info!("[Client][{from}] spawn REMOTE {}", id);
+        // лог фактического цвета сразу после спавна
+        let c = Color::srgba(0.0, 0.0, 1.0, 1.0).to_srgba();
+        info!(
+            "[Client][{from}] spawn REMOTE {} color=({:.3},{:.3},{:.3},{:.3})",
+            id, c.red, c.green, c.blue, c.alpha
+        );
     }
 }
 
