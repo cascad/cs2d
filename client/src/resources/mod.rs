@@ -84,3 +84,6 @@ pub struct HpUiMap(pub HashMap<u64, Entity>);
 // Ресурс карты, заполняется на клиенте при загрузке уровня (или из сервера).
 #[derive(Resource, Default)]
 pub struct SolidTiles(pub std::collections::HashSet<IVec2>);
+
+#[derive(Resource, Default, Clone)]
+pub struct WallAabbCache(pub Vec<(Vec2, Vec2)>); // (min, max)

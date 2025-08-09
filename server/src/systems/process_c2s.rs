@@ -3,6 +3,7 @@ use crate::resources::{
     AppliedSeqs, GrenadeState, Grenades, LastGrenadeThrows, LastHeard, PendingInputs, PlayerStates,
     SnapshotHistory,
 };
+use crate::systems::wall::Wall;
 use crate::utils::{check_hit_lag_comp, push_history};
 use bevy::prelude::*;
 use bevy_quinnet::server::QuinnetServer;
@@ -22,6 +23,7 @@ pub fn process_c2s_messages(
     mut grenades: ResMut<Grenades>,
     mut last_grenade: ResMut<LastGrenadeThrows>,
     mut damage_events: EventWriter<DamageEvent>,
+    wall_q: Query<(&Transform, &Sprite), With<Wall>>,
     time: Res<Time>,
 ) {
     let now = time.elapsed_secs_f64();
@@ -40,7 +42,8 @@ pub fn process_c2s_messages(
                 }
                 C2S::Shoot(shoot) => {
                     // println!("🔫 [Server] ShootEvent from {}: {:?}", client_id, shoot);
-                    if let Some(hit) = check_hit_lag_comp(&history.buf, &states.0, &shoot) {
+                    if let Some(hit) = check_hit_lag_comp(&history.buf, &states.0, &shoot, &wall_q)
+                    {
                         println!("💥 [Server] hit target {}", hit);
 
                         damage_events.write(DamageEvent {

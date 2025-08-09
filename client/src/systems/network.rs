@@ -8,9 +8,12 @@ use crate::events::{
 use crate::resources::grenades::{GrenadeStates, NetState};
 use crate::resources::{
     ClientLatency, DeadPlayers, HpUiMap, MyPlayer, PendingInputsClient, SnapshotBuffer,
-    SpawnedPlayers, TimeSync, UiFont,
+    SpawnedPlayers, TimeSync, UiFont, WallAabbCache,
 };
-use crate::systems::utils::{spawn_hp_ui, time_in_seconds};
+use crate::systems::level::Wall;
+use crate::systems::utils::{
+    raycast_to_walls, raycast_to_walls_cached, spawn_hp_ui, time_in_seconds,
+};
 use bevy::prelude::*;
 use bevy_quinnet::client::QuinnetClient;
 use protocol::constants::{CH_S2C, MOVE_SPEED, PLAYER_SIZE, TICK_DT};
@@ -36,6 +39,7 @@ pub fn receive_server_messages(
     // mut grenade_spawn_events: EventWriter<GrenadeSpawnEvent>,
     font: Res<UiFont>,
     mut grenade_states: ResMut<GrenadeStates>,
+    wall_cache: Res<WallAabbCache>,
 
     // 🔽 четыре EventWriter-a свернули в один параметр
     mut events: ParamSet<(
@@ -118,9 +122,42 @@ pub fn receive_server_messages(
             // ===================================================
             // 2) СТРЕЛЬБА
             // ===================================================
+            // S2C::ShootFx(fx) => {
+            //     println!("💥 [Client] got FX from {} at {:?}", fx.shooter_id, fx.from);
+            //     if fx.shooter_id != my.id {
+            //         commands.spawn((
+            //             Sprite {
+            //                 color: Color::WHITE,
+            //                 custom_size: Some(Vec2::new(12.0, 2.0)),
+            //                 ..default()
+            //             },
+            //             Transform::from_translation(fx.from.extend(10.0))
+            //                 .with_rotation(Quat::from_rotation_z(fx.dir.y.atan2(fx.dir.x))),
+            //             GlobalTransform::default(),
+            //             Bullet {
+            //                 ttl: BULLET_TTL,
+            //                 vel: fx.dir * BULLET_SPEED,
+            //             },
+            //         ));
+            //     }
+            // }
             S2C::ShootFx(fx) => {
-                println!("💥 [Client] got FX from {} at {:?}", fx.shooter_id, fx.from);
-                if fx.shooter_id != my.id {
+                // рисуем только чужие трассеры
+                // if fx.shooter_id != my.id {
+                // макс. дальность = скорость * ttl
+                let max_dist = BULLET_SPEED * BULLET_TTL;
+                let dir = fx.dir.normalize_or_zero();
+
+                // расстояние до первой стены; берём из кэша AABB
+                let hit_dist = raycast_to_walls_cached(fx.from, dir, max_dist, &wall_cache.0);
+
+                // если стена прямо у дула — не спавним пулю
+                if hit_dist <= 0.5 {
+                    // info!("🔫 tracer blocked immediately");
+                } else {
+                    // обрезаем трассер по стене: ttl = dist / speed
+                    let ttl = hit_dist / BULLET_SPEED;
+
                     commands.spawn((
                         Sprite {
                             color: Color::WHITE,
@@ -128,14 +165,15 @@ pub fn receive_server_messages(
                             ..default()
                         },
                         Transform::from_translation(fx.from.extend(10.0))
-                            .with_rotation(Quat::from_rotation_z(fx.dir.y.atan2(fx.dir.x))),
+                            .with_rotation(Quat::from_rotation_z(dir.y.atan2(dir.x))),
                         GlobalTransform::default(),
                         Bullet {
-                            ttl: BULLET_TTL,
-                            vel: fx.dir * BULLET_SPEED,
+                            ttl,
+                            vel: dir * BULLET_SPEED,
                         },
                     ));
                 }
+                // }
             }
             // ===================================================
             // 2) СПАВН ИГРОКА (новый или респавн)
@@ -352,10 +390,14 @@ pub fn apply_grenade_net(
         info!("apply id={} pos={:?}", net.id, tf.translation.truncate());
 
         if let Some(s) = states.0.get(&net.id) {
-            if !s.has { continue; }
+            if !s.has {
+                continue;
+            }
             let mut dt = (now_server - s.ts) as f32;
-            if !time_sync.offset.is_finite() { dt = 0.0; }      // до первого Snapshot
-            dt = dt.clamp(0.0, 0.25);                           // анти-скачок
+            if !time_sync.offset.is_finite() {
+                dt = 0.0;
+            } // до первого Snapshot
+            dt = dt.clamp(0.0, 0.25); // анти-скачок
             let pos = s.pos + s.vel * dt;
             tf.translation.x = pos.x;
             tf.translation.y = pos.y;

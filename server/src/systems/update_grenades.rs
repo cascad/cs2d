@@ -10,89 +10,6 @@ use protocol::constants::{
 };
 use protocol::messages::S2C;
 
-// ---- утилиты коллизии -------------------------------------------------------
-
-#[inline]
-fn clamp_vec2(p: Vec2, min: Vec2, max: Vec2) -> Vec2 {
-    Vec2::new(p.x.clamp(min.x, max.x), p.y.clamp(min.y, max.y))
-}
-
-/// Точная коллизия круг (центр `c`, радиус `r`) против прямоугольника стены.
-/// Возвращает (normal, correction), где:
-/// - normal — наружная нормаль поверхности контакта;
-/// - correction — вектор минимальной коррекции центра круга, чтобы выйти из пересечения.
-fn collide_circle_with_wall_precise(
-    c: Vec2,
-    r: f32,
-    wt: &Transform,
-    sprite: &Sprite,
-) -> Option<(Vec2, Vec2)> {
-    let size = sprite.custom_size?;
-    let half_w = size / 2.0;
-    let rect_center = wt.translation.truncate();
-    let min_b = rect_center - half_w;
-    let max_b = rect_center + half_w;
-
-    // Ближайшая точка прямоугольника к центру круга
-    let closest = clamp_vec2(c, min_b, max_b);
-    let delta = c - closest;
-    let d2 = delta.length_squared();
-
-    if d2 > r * r {
-        return None; // нет пересечения
-    }
-
-    // Есть пересечение.
-    if d2 > 0.0 {
-        // Обычный случай: ближайшая точка на стороне/углу → нормаль = нормализованный delta
-        let dist = d2.sqrt();
-        let n = delta / dist;
-        // сколько нужно вытолкнуть из прямоугольника
-        let push = (r - dist) + SEPARATION_EPS;
-        return Some((n, n * push));
-    }
-
-    // Редкий случай: центр круга уже внутри прямоугольника (closest == c).
-    // Выбираем ось с минимальным проникновением до стороны и толкаем по ней.
-    let pen_left = (c.x - min_b.x).abs();
-    let pen_right = (max_b.x - c.x).abs();
-    let pen_bottom = (c.y - min_b.y).abs();
-    let pen_top = (max_b.y - c.y).abs();
-
-    let (n, push) = {
-        let min_x = pen_left.min(pen_right);
-        let min_y = pen_bottom.min(pen_top);
-        if min_x < min_y {
-            if pen_left < pen_right {
-                (Vec2::NEG_X, (r + SEPARATION_EPS))
-            } else {
-                (Vec2::X, (r + SEPARATION_EPS))
-            }
-        } else {
-            if pen_bottom < pen_top {
-                (Vec2::NEG_Y, (r + SEPARATION_EPS))
-            } else {
-                (Vec2::Y, (r + SEPARATION_EPS))
-            }
-        }
-    };
-    Some((n, n * push))
-}
-
-/// Проверка по всем стенам: возвращает первую найденную нормаль и коррекцию
-fn collide_circle_with_walls(
-    center: Vec2,
-    r: f32,
-    wall_q: &Query<(&Transform, &Sprite), With<Wall>>,
-) -> Option<(Vec2, Vec2)> {
-    for (wt, sprite) in wall_q.iter() {
-        if let Some(hit) = collide_circle_with_wall_precise(center, r, wt, sprite) {
-            return Some(hit);
-        }
-    }
-    None
-}
-
 // ---- основная система -------------------------------------------------------
 
 /// Обновляем гранаты: полёт с отскоком + взрыв по таймеру (без Rapier)
@@ -221,6 +138,12 @@ pub fn update_grenades(
             for (&pid, pst) in states.0.iter() {
                 let dist = (pst.pos - pos).length();
                 if dist <= GRENADE_BLAST_RADIUS {
+                    // проверка, не перекрыта ли линия взрыв→игрок стеной
+                    if los_blocked_by_walls(pos, pst.pos, &wall_q) {
+                        // За стенкой — урон не проходит
+                        continue;
+                    }
+
                     let base_damage = ((GRENADE_BLAST_RADIUS - dist) / GRENADE_BLAST_RADIUS * 50.0)
                         * GRENADE_DAMAGE_COEFF;
                     damage_events.write(DamageEvent {
@@ -264,4 +187,157 @@ pub fn broadcast_grenade_syncs(
             },
         );
     }
+}
+
+// ---- утилиты коллизии -------------------------------------------------------
+
+#[inline]
+fn segment_aabb_intersect(p0: Vec2, p1: Vec2, min: Vec2, max: Vec2) -> bool {
+    // Liang–Barsky / slab method
+    let d = p1 - p0;
+    let mut t0 = 0.0f32;
+    let mut t1 = 1.0f32;
+
+    // По X
+    if d.x.abs() < f32::EPSILON {
+        if p0.x < min.x || p0.x > max.x {
+            return false;
+        }
+    } else {
+        let inv_dx = 1.0 / d.x;
+        let mut tmin = (min.x - p0.x) * inv_dx;
+        let mut tmax = (max.x - p0.x) * inv_dx;
+        if tmin > tmax {
+            std::mem::swap(&mut tmin, &mut tmax);
+        }
+        t0 = t0.max(tmin);
+        t1 = t1.min(tmax);
+        if t0 > t1 {
+            return false;
+        }
+    }
+
+    // По Y
+    if d.y.abs() < f32::EPSILON {
+        if p0.y < min.y || p0.y > max.y {
+            return false;
+        }
+    } else {
+        let inv_dy = 1.0 / d.y;
+        let mut tmin = (min.y - p0.y) * inv_dy;
+        let mut tmax = (max.y - p0.y) * inv_dy;
+        if tmin > tmax {
+            std::mem::swap(&mut tmin, &mut tmax);
+        }
+        t0 = t0.max(tmin);
+        t1 = t1.min(tmax);
+        if t0 > t1 {
+            return false;
+        }
+    }
+
+    // Есть пересечение в параметрах [0,1]
+    t0 <= 1.0 && t1 >= 0.0
+}
+
+fn los_blocked_by_walls(
+    p0: Vec2,
+    p1: Vec2,
+    wall_q: &Query<(&Transform, &Sprite), With<Wall>>,
+) -> bool {
+    // небольшой зазор, чтобы не ловить «сам себя», если точка детонации лежит прямо на стене
+    let eps = 0.001;
+    for (wt, sprite) in wall_q.iter() {
+        if let Some(size) = sprite.custom_size {
+            let half = size / 2.0 - Vec2::splat(eps);
+            let c = wt.translation.truncate();
+            let min = c - half;
+            let max = c + half;
+            if segment_aabb_intersect(p0, p1, min, max) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+#[inline]
+fn clamp_vec2(p: Vec2, min: Vec2, max: Vec2) -> Vec2 {
+    Vec2::new(p.x.clamp(min.x, max.x), p.y.clamp(min.y, max.y))
+}
+
+/// Точная коллизия круг (центр `c`, радиус `r`) против прямоугольника стены.
+/// Возвращает (normal, correction), где:
+/// - normal — наружная нормаль поверхности контакта;
+/// - correction — вектор минимальной коррекции центра круга, чтобы выйти из пересечения.
+fn collide_circle_with_wall_precise(
+    c: Vec2,
+    r: f32,
+    wt: &Transform,
+    sprite: &Sprite,
+) -> Option<(Vec2, Vec2)> {
+    let size = sprite.custom_size?;
+    let half_w = size / 2.0;
+    let rect_center = wt.translation.truncate();
+    let min_b = rect_center - half_w;
+    let max_b = rect_center + half_w;
+
+    // Ближайшая точка прямоугольника к центру круга
+    let closest = clamp_vec2(c, min_b, max_b);
+    let delta = c - closest;
+    let d2 = delta.length_squared();
+
+    if d2 > r * r {
+        return None; // нет пересечения
+    }
+
+    // Есть пересечение.
+    if d2 > 0.0 {
+        // Обычный случай: ближайшая точка на стороне/углу → нормаль = нормализованный delta
+        let dist = d2.sqrt();
+        let n = delta / dist;
+        // сколько нужно вытолкнуть из прямоугольника
+        let push = (r - dist) + SEPARATION_EPS;
+        return Some((n, n * push));
+    }
+
+    // Редкий случай: центр круга уже внутри прямоугольника (closest == c).
+    // Выбираем ось с минимальным проникновением до стороны и толкаем по ней.
+    let pen_left = (c.x - min_b.x).abs();
+    let pen_right = (max_b.x - c.x).abs();
+    let pen_bottom = (c.y - min_b.y).abs();
+    let pen_top = (max_b.y - c.y).abs();
+
+    let (n, push) = {
+        let min_x = pen_left.min(pen_right);
+        let min_y = pen_bottom.min(pen_top);
+        if min_x < min_y {
+            if pen_left < pen_right {
+                (Vec2::NEG_X, (r + SEPARATION_EPS))
+            } else {
+                (Vec2::X, (r + SEPARATION_EPS))
+            }
+        } else {
+            if pen_bottom < pen_top {
+                (Vec2::NEG_Y, (r + SEPARATION_EPS))
+            } else {
+                (Vec2::Y, (r + SEPARATION_EPS))
+            }
+        }
+    };
+    Some((n, n * push))
+}
+
+/// Проверка по всем стенам: возвращает первую найденную нормаль и коррекцию
+fn collide_circle_with_walls(
+    center: Vec2,
+    r: f32,
+    wall_q: &Query<(&Transform, &Sprite), With<Wall>>,
+) -> Option<(Vec2, Vec2)> {
+    for (wt, sprite) in wall_q.iter() {
+        if let Some(hit) = collide_circle_with_wall_precise(center, r, wt, sprite) {
+            return Some(hit);
+        }
+    }
+    None
 }

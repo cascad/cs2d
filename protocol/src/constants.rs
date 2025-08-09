@@ -19,7 +19,7 @@ pub const TIMEOUT_SECS: f64 = 3.0;
 pub const RESPAWN_COOLDOWN: f64 = 5.0;
 
 // Скорость полёта гранаты (пикселей в секунду)
-pub const GRENADE_SPEED: f32 = 400.0;
+pub const GRENADE_SPEED: f32 = 300.0;
 // Время до взрыва
 pub const GRENADE_TIMER: f32 = 2.0;
 // Радиус взрыва (в тех же единицах, что и мир)
@@ -47,6 +47,6 @@ pub const SEPARATION_EPS: f32 = 0.5; // «волосок», чтобы не за
 
 // Физика полёта / отскока (должны совпадать на клиенте и сервере)
 pub const GRENADE_AIR_DRAG_PER_SEC: f32 = 0.06; // 6%/сек экспоненциально
-pub const GRENADE_RESTITUTION: f32    = 0.8;    // упругость отражения
+pub const GRENADE_RESTITUTION: f32    = 0.5;    // упругость отражения
 pub const GRENADE_BOUNCE_DAMPING: f32 = 0.70;   // доп. гашение на ударе
 pub const GRENADE_STOP_SPEED: f32     = 30.0;   // ниже — считаем, что остановилась

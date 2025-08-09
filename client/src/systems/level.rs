@@ -6,6 +6,8 @@ use crate::resources::SolidTiles;
 #[derive(Component)]
 pub struct Wall;
 
+
+
 pub fn spawn_level_client(mut commands: Commands) {
     let half_w = LEVEL_WIDTH / 2.0;
     let half_h = LEVEL_HEIGHT / 2.0;

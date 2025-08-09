@@ -15,3 +15,4 @@ pub mod spawn_damage_popups;
 pub mod sync_hp_ui;
 pub mod level;
 pub mod render_detonations;
+pub mod walls_cache;

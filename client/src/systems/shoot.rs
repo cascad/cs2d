@@ -72,7 +72,8 @@ pub fn shoot_mouse(
         Err(e) => println!("❌ [Client] Shoot send error: {:?}", e),
     };
     println!("🎨 [Client] Local spawn_tracer");
-    spawn_tracer(&mut commands, player_pos, dir);
+    // трассер рисуется по ивенту, тут не нужен
+    // spawn_tracer(&mut commands, player_pos, dir);
 }
 
 fn spawn_tracer(commands: &mut Commands, from: Vec2, dir: Vec2) {

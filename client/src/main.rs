@@ -50,6 +50,7 @@ use crate::{
         sync_hp_ui::{
             cleanup_hp_ui_on_player_remove, sync_hp_ui_position, update_hp_text_from_event,
         },
+        walls_cache::build_wall_aabb_cache,
     },
     ui::grenade_ui::setup_grenade_ui,
 };
@@ -79,6 +80,7 @@ fn main() {
         .insert_resource(SolidTiles::default())
         .insert_resource(ClientGrenades::default())
         .insert_resource(GrenadeStates::default())
+        .insert_resource(WallAabbCache::default())
         // ивенты
         .add_event::<PlayerDamagedEvent>()
         .add_event::<PlayerDied>()
@@ -126,7 +128,7 @@ fn main() {
                 spawn_grenades,
                 apply_grenade_net,
                 render_detonations,
-                // 
+                //
                 explosion_lifecycle,
                 grenade_throw,
                 rotate_to_cursor,
@@ -147,5 +149,6 @@ fn main() {
                 cleanup_hp_ui_on_player_remove,
             ),
         )
+        .add_systems(PostUpdate, (build_wall_aabb_cache,))
         .run();
 }
