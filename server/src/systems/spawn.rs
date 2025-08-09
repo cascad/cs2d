@@ -1,6 +1,6 @@
 use crate::{
     events::{ClientConnected, ClientDisconnected, PlayerRespawn},
-    resources::{ConnectedClients, PlayerState, PlayerStates, SpawnedClients},
+    resources::{ConnectedClients, PlayerState, PlayerStates, SpawnPoints, SpawnedClients},
 };
 use bevy::prelude::*;
 use bevy_quinnet::server::QuinnetServer;
@@ -11,15 +11,25 @@ use protocol::messages::S2C;
 /// Функция, где вы решаете стартовую позицию
 /// Простая функция, возвращающая точку спавна по ID.
 /// Замените логику на свою: рандом, круг, свободные точки и т.д.
-fn pick_spawn_point(pid: u64) -> Vec2 {
-    const POINTS: [Vec2; 4] = [
-        Vec2::new(-300.0, -200.0),
-        Vec2::new(300.0, -200.0),
-        Vec2::new(-300.0, 200.0),
-        Vec2::new(300.0, 200.0),
-    ];
-    let idx = (pid as usize) % POINTS.len();
-    POINTS[idx]
+// fn pick_spawn_point(pid: u64) -> Vec2 {
+//     const POINTS: [Vec2; 4] = [
+//         Vec2::new(-300.0, -200.0),
+//         Vec2::new(300.0, -200.0),
+//         Vec2::new(-300.0, 200.0),
+//         Vec2::new(300.0, 200.0),
+//     ];
+//     let idx = (pid as usize) % POINTS.len();
+//     POINTS[idx]
+// }
+
+
+// todo сделать рандом тут
+fn pick_spawn_point(spawns: &Res<SpawnPoints>, index_hint: u64) -> Vec2 {
+    if spawns.0.is_empty() {
+        return Vec2::ZERO;
+    }
+    let i = (index_hint as usize) % spawns.0.len();
+    spawns.0[i]
 }
 
 pub fn process_client_connected(
@@ -28,13 +38,13 @@ pub fn process_client_connected(
     mut spawned: ResMut<SpawnedClients>,
     mut states: ResMut<PlayerStates>,
     mut server: ResMut<QuinnetServer>,
+    spawns: Res<SpawnPoints>,
 ) {
     for ClientConnected(id) in ev.read() {
         if !connected.0.insert(*id) {
             continue;
         }
-
-        let pos = pick_spawn_point(*id);
+        let pos = pick_spawn_point(&spawns, *id);
         states.0.insert(
             *id,
             PlayerState {

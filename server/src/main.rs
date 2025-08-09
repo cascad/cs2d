@@ -21,7 +21,9 @@ use systems::{
     startup::*, timeout::*, update_grenades::*,
 };
 
-use crate::systems::{spawn::process_player_respawn, wall::spawn_level_server};
+use crate::systems::{
+    level_fixed::setup_fixed_level, spawn::process_player_respawn, wall::spawn_level_server,
+};
 // use systems::{
 //     connection::{handle_disconnections, handle_new_connections},
 //     damage::{DamageEvent, apply_damage},
@@ -57,7 +59,10 @@ fn main() {
         .insert_resource(ConnectedClients::default())
         .insert_resource(SpawnedClients::default())
         .insert_resource(LastGrenadeThrows::default())
-        .insert_resource(GrenadeSyncTimer(Timer::from_seconds(0.1, TimerMode::Repeating))) // 10 Гц
+        .insert_resource(GrenadeSyncTimer(Timer::from_seconds(
+            0.1,
+            TimerMode::Repeating,
+        ))) // 10 Гц
         .add_plugins((
             MinimalPlugins, // базовый набор
             LogPlugin {
@@ -74,7 +79,7 @@ fn main() {
         .add_event::<ClientConnected>()
         .add_event::<ClientDisconnected>()
         .add_event::<PlayerRespawn>()
-        .add_systems(Startup, (start_server, spawn_level_server).chain())
+        .add_systems(Startup, (start_server, setup_fixed_level).chain()) // spawn_level_server
         .add_systems(PreUpdate, (handle_new_connections, handle_disconnections))
         .add_systems(
             Update,

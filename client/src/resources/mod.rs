@@ -86,6 +86,9 @@ pub struct HpUiMap(pub HashMap<u64, Entity>);
 pub struct SolidTiles(pub std::collections::HashSet<IVec2>);
 
 #[derive(Resource, Default, Clone)]
+pub struct SpawnPoints(pub Vec<Vec2>);
+
+#[derive(Resource, Default, Clone)]
 pub struct WallAabbCache(pub Vec<(Vec2, Vec2)>); // (min, max)
 
 #[derive(Resource, Default)]

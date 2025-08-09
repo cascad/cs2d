@@ -240,7 +240,7 @@ pub fn receive_server_messages(
             }
 
             S2C::GrenadeSync { id, pos, vel, ts } => {
-                info!("SYNC GRENADES: {:?}", pos);
+                // info!("grenades sync: {:?}", pos);
                 let e = net.grenade_states.0.entry(id).or_default();
                 *e = NetState {
                     pos,

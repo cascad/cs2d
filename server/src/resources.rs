@@ -1,5 +1,5 @@
 use bevy::{
-    math::Vec2,
+    math::{IVec2, Vec2},
     prelude::{Resource, Timer},
 };
 use protocol::{
@@ -86,3 +86,10 @@ pub struct LastGrenadeThrows {
 
 #[derive(Resource, Default)]
 pub struct GrenadeSyncTimer(pub Timer);
+
+// Ресурс карты, заполняется на клиенте при загрузке уровня (или из сервера).
+#[derive(Resource, Default)]
+pub struct SolidTiles(pub std::collections::HashSet<IVec2>);
+
+#[derive(Resource, Default, Clone)]
+pub struct SpawnPoints(pub Vec<Vec2>);

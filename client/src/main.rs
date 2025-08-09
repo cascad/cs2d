@@ -36,7 +36,6 @@ use ui::update_grenade_cooldown_ui::update_grenade_cooldown_ui;
 
 use crate::{
     app_state::AppState,
-    components::PlayerMarker,
     events::{
         GrenadeDetonatedEvent, GrenadeSpawnEvent, PlayerDamagedEvent, PlayerDied, PlayerLeftEvent,
     },
@@ -48,16 +47,15 @@ use crate::{
         corpse_lc::corpse_lifecycle,
         ensure_my_id::ensure_my_id_from_conn,
         grenade_lifecycle::spawn_grenades,
-        level::{fill_solid_tiles_once, spawn_level_client},
+        level::fill_solid_tiles_once,
+        level_fixed::setup_fixed_level,
         network::apply_grenade_net,
-        reconcile_colors::reconcile_local_and_colors,
         render_detonations::render_detonations,
         spawn_damage_popups::{spawn_damage_popups, update_damage_popups},
         startup::load_ui_font,
         sync_hp_ui::{
             cleanup_hp_ui_on_player_remove, sync_hp_ui_position, update_hp_text_from_event,
         },
-        sync_local::sync_local_and_tint,
         walls_cache::build_wall_aabb_cache,
     },
     ui::grenade_ui::setup_grenade_ui,
@@ -121,7 +119,7 @@ fn main() {
         // --- загрузка уровня и UI при входе в InGame ---
         .add_systems(
             OnEnter(AppState::InGame),
-            (setup, spawn_level_client, setup_grenade_ui),
+            (setup, setup_fixed_level, setup_grenade_ui),
         )
         // --- PreUpdate: сетка/инпут и приём сообщений только в InGame ---
         .add_systems(
@@ -181,26 +179,5 @@ fn main() {
             )
                 .run_if(in_state(AppState::InGame)),
         )
-        // .add_systems(
-        //     PostUpdate,
-        //     sync_local_and_tint
-        //         .run_if(in_state(AppState::InGame))
-        //         .run_if(resource_changed::<MyPlayer>),
-        // )
-        // // А чтобы гарантированно сработало и при спавне игроков из снапшота — второй запуск,
-        // // но только когда реально были добавления/изменения компонентов в кадре:
-        // .add_systems(
-        //     PostUpdate,
-        //     sync_local_and_tint
-        //         .run_if(in_state(AppState::InGame))
-        //         .run_if(any_with_component_added::<PlayerMarker>), // helper ниже
-        // )
         .run();
-}
-
-fn any_with_component_added<T: Component>(world: &World) -> bool {
-    // дешёвый признак: есть ли в мире недавно добавленные T
-    // В 0.16 прямого API нет, используем эвристически: запускаем sync на входе InGame и при MyPlayer change.
-    // Если хочешь жёстче — просто оставь два вызова sync: на MyPlayer change и OnEnter(InGame).
-    false
 }
