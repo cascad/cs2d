@@ -1,0 +1,118 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  build:
+    name: Build ${{ matrix.kind }} on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Windows (MSVC)
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            kind: windows-x86_64
+            bin_ext: .exe
+
+          # Linux (glibc)
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            kind: linux-x86_64-gnu
+            bin_ext: ""
+
+          # macOS Apple Silicon
+          - os: macos-14
+            target: aarch64-apple-darwin
+            kind: macos-arm64
+            bin_ext: ""
+
+          # macOS Intel (по желанию можно убрать)
+          - os: macos-13
+            target: x86_64-apple-darwin
+            kind: macos-x86_64
+            bin_ext: ""
+
+    env:
+      # Имена бинарей твоих крейтов
+      CLIENT_BIN: client
+      SERVER_BIN: server
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      # Библиотеки для Bevy/wgpu на Linux
+      - name: Install Linux deps
+        if: startsWith(matrix.os, 'ubuntu-')
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libasound2-dev libudev-dev libx11-dev \
+            libxi-dev libgl1-mesa-dev libxcb-shape0-dev libxcb-xfixes0-dev
+
+      - name: Build (release)
+        run: |
+          cargo build --release --target ${{ matrix.target }} --bin $env:CLIENT_BIN
+          cargo build --release --target ${{ matrix.target }} --bin $env:SERVER_BIN
+        shell: pwsh
+
+      - name: Prepare package
+        shell: bash
+        run: |
+          set -eux
+          KIND="${{ matrix.kind }}"
+          TGT="${{ matrix.target }}"
+          OUT="dist/${KIND}"
+          mkdir -p "$OUT"
+
+          cp "target/${TGT}/release/${CLIENT_BIN}${{ matrix.bin_ext }}" "$OUT/"
+          cp "target/${TGT}/release/${SERVER_BIN}${{ matrix.bin_ext }}" "$OUT/"
+
+          if [ -d assets ]; then cp -r assets "$OUT/"; fi
+          [ -f README.md ] && cp README.md "$OUT/"
+
+          # Имя архива с версией
+          VER="${GITHUB_REF_NAME}"
+          cd dist
+          ARCH="cs2d_${KIND}_${VER}.zip"
+          if [[ "${{ matrix.os }}" == "windows-latest" ]]; then
+            powershell -Command "Compress-Archive -Path '${KIND}/*' -DestinationPath '$ARCH'"
+          else
+            zip -r "$ARCH" "$KIND"
+          fi
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: packages
+          path: dist/*.zip
+
+  release:
+    name: Publish Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: packages
+          path: dist
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.zip
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
