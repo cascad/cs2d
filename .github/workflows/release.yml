@@ -5,6 +5,9 @@ on:
     tags:
       - "v*"
 
+permissions:
+  contents: write   # нужно для создания релиза и загрузки файлов
+
 jobs:
   build:
     name: Build ${{ matrix.kind }} on ${{ matrix.os }}
@@ -31,14 +34,14 @@ jobs:
             kind: macos-arm64
             bin_ext: ""
 
-          # macOS Intel (по желанию можно убрать)
+          # macOS Intel (можно убрать, если не нужен)
           - os: macos-13
             target: x86_64-apple-darwin
             kind: macos-x86_64
             bin_ext: ""
 
     env:
-      # Имена бинарей твоих крейтов
+      # если бинарии называются иначе — поправь эти имена
       CLIENT_BIN: client
       SERVER_BIN: server
 
@@ -53,7 +56,7 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
 
-      # Библиотеки для Bevy/wgpu на Linux
+      # Линки и рантайм для Bevy/wgpu на Linux
       - name: Install Linux deps
         if: startsWith(matrix.os, 'ubuntu-')
         run: |
@@ -63,9 +66,8 @@ jobs:
 
       - name: Build (release)
         run: |
-          cargo build --release --target ${{ matrix.target }} --bin $env:CLIENT_BIN
-          cargo build --release --target ${{ matrix.target }} --bin $env:SERVER_BIN
-        shell: pwsh
+          cargo build --release --target ${{ matrix.target }} --bin client
+          cargo build --release --target ${{ matrix.target }} --bin server
 
       - name: Prepare package
         shell: bash
@@ -73,17 +75,17 @@ jobs:
           set -eux
           KIND="${{ matrix.kind }}"
           TGT="${{ matrix.target }}"
+          VER="${GITHUB_REF_NAME}"
           OUT="dist/${KIND}"
           mkdir -p "$OUT"
 
           cp "target/${TGT}/release/${CLIENT_BIN}${{ matrix.bin_ext }}" "$OUT/"
           cp "target/${TGT}/release/${SERVER_BIN}${{ matrix.bin_ext }}" "$OUT/"
 
+          # ассеты рядом с бинарями — так Bevy их найдёт
           if [ -d assets ]; then cp -r assets "$OUT/"; fi
           [ -f README.md ] && cp README.md "$OUT/"
 
-          # Имя архива с версией
-          VER="${GITHUB_REF_NAME}"
           cd dist
           ARCH="cs2d_${KIND}_${VER}.zip"
           if [[ "${{ matrix.os }}" == "windows-latest" ]]; then
@@ -92,21 +94,24 @@ jobs:
             zip -r "$ARCH" "$KIND"
           fi
 
-      - name: Upload artifact
+      - name: Upload artifact (unique per target)
         uses: actions/upload-artifact@v4
         with:
-          name: packages
-          path: dist/*.zip
+          name: cs2d_${{ matrix.kind }}_${{ github.ref_name }}
+          path: dist/cs2d_${{ matrix.kind }}_${{ github.ref_name }}.zip
+          if-no-files-found: error
 
   release:
     name: Publish Release
     needs: build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v4
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
         with:
-          name: packages
+          pattern: cs2d_*
           path: dist
+          merge-multiple: true
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
