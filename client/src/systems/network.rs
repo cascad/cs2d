@@ -53,10 +53,7 @@ pub struct NetCtx<'w, 's> {
     pub next_state: ResMut<'w, NextState<AppState>>,
 }
 
-pub fn receive_server_messages(
-    mut client: ResMut<QuinnetClient>,
-    mut net: NetCtx,
-) {
+pub fn receive_server_messages(mut client: ResMut<QuinnetClient>, mut net: NetCtx) {
     // если дефолтного соединения нет — выходим
     let Some(conn) = client.get_connection_mut() else {
         return;
@@ -354,7 +351,11 @@ fn spawn_player(
         .id();
 
     if is_local {
+        // Маркер, что это локальный игрок
         commands.entity(entity).insert(LocalPlayer);
+        // Компонент для плагина камеры (только локальному), только если
+        // надо ехать за игроком
+        // commands.entity(entity).insert(Velocity(Vec2::ZERO));
         info!("[Client]{from} spawn LOCAL {}", id);
     } else {
         info!("[Client][{from}] spawn REMOTE {}", id);

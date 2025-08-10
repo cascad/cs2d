@@ -39,13 +39,14 @@ use crate::{
     events::{
         GrenadeDetonatedEvent, GrenadeSpawnEvent, PlayerDamagedEvent, PlayerDied, PlayerLeftEvent,
     },
-    menu::{MenuPlugin, clear_connect_timeout, connection_timeout_system},
+    menu::{clear_connect_timeout, connection_timeout_system, MenuPlugin},
     resources::grenades::{ClientGrenades, GrenadeCooldown, GrenadeStates},
     systems::{
         // +++ насос Connecting: ждём первый Snapshot, затем -> InGame +++
         connecting_pump::connecting_pump,
         corpse_lc::corpse_lifecycle,
         ensure_my_id::ensure_my_id_from_conn,
+        camera::{CameraFollowPlugin},
         grenade_lifecycle::spawn_grenades,
         level::fill_solid_tiles_once,
         level_fixed::setup_fixed_level,
@@ -104,6 +105,9 @@ fn main() {
             ..default()
         }))
         .add_plugins(QuinnetClientPlugin::default())
+        .add_plugins(CameraFollowPlugin)
+        // (опционально) сразу включить плавный режим:
+        // .insert_resource(CameraFollowSettings { mode: FollowMode::Smooth, ..default() })
         // состояния и меню
         .insert_state(AppState::Menu)
         .add_plugins(MenuPlugin)
@@ -119,7 +123,11 @@ fn main() {
         // --- загрузка уровня и UI при входе в InGame ---
         .add_systems(
             OnEnter(AppState::InGame),
-            (setup, setup_fixed_level, setup_grenade_ui),
+            (
+                setup,
+                setup_fixed_level,
+                setup_grenade_ui,
+            ),
         )
         // --- PreUpdate: сетка/инпут и приём сообщений только в InGame ---
         .add_systems(
@@ -174,8 +182,6 @@ fn main() {
             PostUpdate,
             (
                 build_wall_aabb_cache,
-                // ensure_localplayer_after_id_set,
-                // reconcile_local_and_colors,
             )
                 .run_if(in_state(AppState::InGame)),
         )
