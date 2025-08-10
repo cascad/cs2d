@@ -22,3 +22,4 @@ pub mod ensure_my_id;
 pub mod sync_local;
 pub mod level_fixed;
 pub mod camera;
+pub mod aim;

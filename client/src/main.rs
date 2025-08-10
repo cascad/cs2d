@@ -43,21 +43,9 @@ use crate::{
     resources::grenades::{ClientGrenades, GrenadeCooldown, GrenadeStates},
     systems::{
         // +++ насос Connecting: ждём первый Snapshot, затем -> InGame +++
-        connecting_pump::connecting_pump,
-        corpse_lc::corpse_lifecycle,
-        ensure_my_id::ensure_my_id_from_conn,
-        camera::{CameraFollowPlugin},
-        grenade_lifecycle::spawn_grenades,
-        level::fill_solid_tiles_once,
-        level_fixed::setup_fixed_level,
-        network::apply_grenade_net,
-        render_detonations::render_detonations,
-        spawn_damage_popups::{spawn_damage_popups, update_damage_popups},
-        startup::load_ui_font,
-        sync_hp_ui::{
+        aim::{spawn_aim_marker, update_aim_to_mouse}, camera::CameraFollowPlugin, connecting_pump::connecting_pump, corpse_lc::corpse_lifecycle, ensure_my_id::ensure_my_id_from_conn, grenade_lifecycle::spawn_grenades, level::fill_solid_tiles_once, level_fixed::setup_fixed_level, network::apply_grenade_net, render_detonations::render_detonations, spawn_damage_popups::{spawn_damage_popups, update_damage_popups}, startup::load_ui_font, sync_hp_ui::{
             cleanup_hp_ui_on_player_remove, sync_hp_ui_position, update_hp_text_from_event,
-        },
-        walls_cache::build_wall_aabb_cache,
+        }, walls_cache::build_wall_aabb_cache
     },
     ui::grenade_ui::setup_grenade_ui,
 };
@@ -142,6 +130,8 @@ fn main() {
                 .chain()
                 .run_if(in_state(AppState::InGame)),
         )
+        .add_systems(OnEnter(AppState::InGame), spawn_aim_marker)
+        .add_systems(Update, update_aim_to_mouse.run_if(in_state(AppState::InGame)))
         // --- Update: вся игровая логика только в InGame ---
         .add_systems(
             Update,

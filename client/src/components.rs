@@ -1,5 +1,4 @@
-use std::collections::HashMap;
-
+use crate::resources::MyPlayer;
 use bevy::prelude::*;
 
 #[derive(Component)]
@@ -49,3 +48,7 @@ pub struct GrenadeNet {
 pub struct Corpse {
     pub timer: Timer, // сколько лежит труп
 }
+
+// компонент для маркера
+#[derive(Component)]
+pub struct AimMarker;
