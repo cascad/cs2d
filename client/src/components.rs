@@ -52,3 +52,6 @@ pub struct Corpse {
 // компонент для маркера
 #[derive(Component)]
 pub struct AimMarker;
+
+#[derive(Component)]
+pub struct AimLineMarker;
