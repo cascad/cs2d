@@ -14,6 +14,8 @@ pub struct PlayerState {
     pub rot: f32,
     pub stance: protocol::messages::Stance,
     pub hp: i32,
+    pub abilities: protocol::abilities::Abilities,
+    pub blocking: bool,
 }
 
 #[derive(Resource, Default)]
@@ -90,6 +92,16 @@ pub struct GrenadeSyncTimer(pub Timer);
 // Ресурс карты, заполняется на клиенте при загрузке уровня (или из сервера).
 #[derive(Resource, Default)]
 pub struct SolidTiles(pub std::collections::HashSet<IVec2>);
+
+/// Предрасчитанные AABB всех стен (min, max) в мировых координатах.
+/// Строится один раз при загрузке уровня и используется всеми
+/// серверными проверками коллизий вместо перебора ECS-запроса по стенам.
+#[derive(Resource, Default)]
+pub struct WallAabbs(pub Vec<(Vec2, Vec2)>);
+
+/// Пространственная сетка стен для быстрых отрезковых запросов (рейкаст/LOS).
+#[derive(Resource, Default)]
+pub struct WallGridRes(pub protocol::geom::WallGrid);
 
 #[derive(Resource, Default, Clone)]
 pub struct SpawnPoints(pub Vec<Vec2>);

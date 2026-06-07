@@ -1,9 +1,9 @@
 use crate::constants::{HITBOX_RADIUS, MAX_RAY_LEN};
 use crate::resources::PlayerState;
-use crate::systems::wall::Wall;
 use bevy::prelude::*;
+use protocol::geom::WallGrid;
 use protocol::messages::ShootEvent;
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 
 /// Сохраняем историю состояний
 pub fn push_history(
@@ -20,9 +20,9 @@ pub fn push_history(
 // --- ВАША ФУНКЦИЯ С ДОБАВЛЕННЫМ LOS ---
 pub fn check_hit_lag_comp(
     history: &std::collections::VecDeque<(f64, std::collections::HashMap<u64, PlayerState>)>,
-    current: &std::collections::HashMap<u64, PlayerState>,
+    _current: &std::collections::HashMap<u64, PlayerState>,
     shoot: &ShootEvent,
-    wall_q: &Query<(&Transform, &Sprite), With<Wall>>,        // ← НОВЫЙ ПАРАМЕТР
+    walls: &WallGrid,        // спатиал-сетка стен
 ) -> Option<u64> {
     // Находим два снапшота вокруг shoot.timestamp
     let mut prev = None;
@@ -54,6 +54,7 @@ pub fn check_hit_lag_comp(
                     rot: lerped_rot,
                     stance: p1.stance.clone(),
                     hp: p1.hp,
+                    ..Default::default()
                 },
             );
         }
@@ -79,7 +80,7 @@ pub fn check_hit_lag_comp(
         // радиальное расстояние от центра цели до луча
         if to_target.length() > 0.0 && to_target.distance(dir * proj_len) <= HITBOX_RADIUS {
             // NEW: проверяем видимость до ближайшей точки попадания (а не до центра)
-            if los_blocked_by_walls(shooter.pos, nearest, wall_q) {
+            if los_blocked_by_walls(shooter.pos, nearest, walls) {
                 continue; // стена закрывает — не считаем попаданием
             }
             return Some(id);
@@ -88,68 +89,75 @@ pub fn check_hit_lag_comp(
     None
 }
 
-fn los_blocked_by_walls(
-    p0: Vec2,
-    p1: Vec2,
-    wall_q: &Query<(&Transform, &Sprite), With<Wall>>,
-) -> bool {
-    let eps = 0.001;
-    for (wt, sprite) in wall_q.iter() {
-        if let Some(size) = sprite.custom_size {
-            let half = size / 2.0 - Vec2::splat(eps);
-            let c = wt.translation.truncate();
-            let min = c - half;
-            let max = c + half;
-            if segment_aabb_intersect_t(p0, p1, min, max).is_some() {
-                return true;
-            }
-        }
-    }
-    false
+fn los_blocked_by_walls(p0: Vec2, p1: Vec2, walls: &WallGrid) -> bool {
+    // тот же зазор, что и раньше; теперь через спатиал-сетку (O ~ длины пути)
+    walls.segment_blocked(p0, p1, 0.001)
 }
 
-// ---------- Утилита: пересечение отрезка (луча) с AABB стены ----------
-#[inline]
-fn segment_aabb_intersect_t(p0: Vec2, p1: Vec2, min: Vec2, max: Vec2) -> Option<f32> {
-    // Liang–Barsky / slab
-    let d = p1 - p0;
-    let mut t0 = 0.0f32;
-    let mut t1 = 1.0f32;
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use protocol::messages::{ShootEvent, Stance};
+    use std::collections::{HashMap, VecDeque};
 
-    if d.x.abs() < f32::EPSILON {
-        if p0.x < min.x || p0.x > max.x {
-            return None;
-        }
-    } else {
-        let inv = 1.0 / d.x;
-        let mut tmin = (min.x - p0.x) * inv;
-        let mut tmax = (max.x - p0.x) * inv;
-        if tmin > tmax {
-            core::mem::swap(&mut tmin, &mut tmax);
-        }
-        t0 = t0.max(tmin);
-        t1 = t1.min(tmax);
-        if t0 > t1 {
-            return None;
+    fn ps(pos: Vec2) -> PlayerState {
+        PlayerState {
+            pos,
+            rot: 0.0,
+            stance: Stance::Standing,
+            hp: 100,
+            ..Default::default()
         }
     }
 
-    if d.y.abs() < f32::EPSILON {
-        if p0.y < min.y || p0.y > max.y {
-            return None;
-        }
-    } else {
-        let inv = 1.0 / d.y;
-        let mut tmin = (min.y - p0.y) * inv;
-        let mut tmax = (max.y - p0.y) * inv;
-        if tmin > tmax {
-            core::mem::swap(&mut tmin, &mut tmax);
-        }
-        t0 = t0.max(tmin);
-        t1 = t1.min(tmax);
-        if t0 > t1 {
-            return None;
-        }
+    /// История из двух одинаковых снапшотов (t=0 и t=1) со стрелком id=1 и целью id=2.
+    fn history_with(
+        shooter: Vec2,
+        target: Vec2,
+    ) -> VecDeque<(f64, HashMap<u64, PlayerState>)> {
+        let mut s = HashMap::new();
+        s.insert(1u64, ps(shooter));
+        s.insert(2u64, ps(target));
+        let mut h = VecDeque::new();
+        h.push_back((0.0f64, s.clone()));
+        h.push_back((1.0f64, s));
+        h
     }
-    Some(t0.clamp(0.0, 1.0))
+
+    #[test]
+    fn hits_target_in_line_of_fire() {
+        let h = history_with(Vec2::new(0.0, 0.0), Vec2::new(100.0, 0.0));
+        let shoot = ShootEvent {
+            shooter_id: 1,
+            dir: Vec2::new(1.0, 0.0),
+            timestamp: 0.5,
+        };
+        let empty = WallGrid::default();
+        assert_eq!(check_hit_lag_comp(&h, &HashMap::new(), &shoot, &empty), Some(2));
+    }
+
+    #[test]
+    fn wall_blocks_the_shot() {
+        let h = history_with(Vec2::new(0.0, 0.0), Vec2::new(100.0, 0.0));
+        let shoot = ShootEvent {
+            shooter_id: 1,
+            dir: Vec2::new(1.0, 0.0),
+            timestamp: 0.5,
+        };
+        // стена поперёк траектории между стрелком и целью
+        let grid = WallGrid::build(&[(Vec2::new(40.0, -50.0), Vec2::new(60.0, 50.0))], 64.0);
+        assert_eq!(check_hit_lag_comp(&h, &HashMap::new(), &shoot, &grid), None);
+    }
+
+    #[test]
+    fn target_behind_shooter_is_not_hit() {
+        let h = history_with(Vec2::new(0.0, 0.0), Vec2::new(-100.0, 0.0));
+        let shoot = ShootEvent {
+            shooter_id: 1,
+            dir: Vec2::new(1.0, 0.0),
+            timestamp: 0.5,
+        };
+        let empty = WallGrid::default();
+        assert_eq!(check_hit_lag_comp(&h, &HashMap::new(), &shoot, &empty), None);
+    }
 }

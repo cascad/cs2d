@@ -78,6 +78,15 @@ pub struct DeadPlayers(pub HashSet<u64>);
 #[derive(Resource, Clone)]
 pub struct UiFont(pub Handle<Font>);
 
+/// Сгенерированная текстура белого круга для рендера игрока (тонируется цветом).
+#[derive(Resource, Clone)]
+pub struct CircleTex(pub Handle<Image>);
+
+/// Меш-сектор взмаха melee (радиус + угол), в локальных координатах вершиной в
+/// центре игрока и раскрытием по +X. Строится один раз.
+#[derive(Resource, Clone)]
+pub struct MeleeMesh(pub Handle<Mesh>);
+
 #[derive(Resource, Default)]
 pub struct HpUiMap(pub HashMap<u64, Entity>);
 
@@ -91,8 +100,41 @@ pub struct SpawnPoints(pub Vec<Vec2>);
 #[derive(Resource, Default, Clone)]
 pub struct WallAabbCache(pub Vec<(Vec2, Vec2)>); // (min, max)
 
+/// Пространственная сетка стен для быстрых рейкастов (трассеры, обрезка взрывов).
+#[derive(Resource, Default)]
+pub struct WallGridRes(pub protocol::geom::WallGrid);
+
 #[derive(Resource, Default)]
 pub struct LastKnownPos(pub HashMap<u64, (Vec2, f32)>); // id -> (pos, rot)
+
+/// Время (клиентское, сек) последнего появления игрока в снапшоте. Нужно для
+/// плавного скрытия тех, кого сервер перестал присылать (туман войны): пропал
+/// из снапшотов → угасает → деспавн. id → last_seen.
+#[derive(Resource, Default)]
+pub struct LastSeen(pub HashMap<u64, f64>);
+
+/// Локальное предсказание способностей игрока (стамина/рывок/кулдауны).
+/// Используется для отзывчивого предсказания рывка; стамина для UI берётся
+/// из снапшота (авторитет сервера).
+#[derive(Resource, Default)]
+pub struct LocalAbilities(pub protocol::abilities::Abilities);
+
+/// Стамина/блок локального игрока из последнего снапшота (для UI).
+#[derive(Resource, Default)]
+pub struct LocalStatus {
+    pub stamina: f32,
+    pub blocking: bool,
+}
+
+/// Точная предсказанная позиция локального игрока (симуляция). Двигается в
+/// локстепе с отправкой ввода (раз в тик) и правится реконсиляцией. Отрисовка
+/// (Transform) плавно тянется к ней — это чисто визуальное сглаживание, на
+/// других клиентов не влияет (они видят нас из серверных снапшотов).
+#[derive(Resource, Default)]
+pub struct PredictedPos {
+    pub pos: Vec2,
+    pub valid: bool,
+}
 
 #[derive(Resource, Default)]
 pub struct ConnectError(pub Option<String>);

@@ -1,5 +1,5 @@
-use crate::systems::level::Wall;
-use crate::systems::utils::raycast_to_walls;
+use crate::render::{layers, world_to_translation, RenderLayer, WorldPos};
+use crate::resources::WallGridRes;
 use crate::ui::components::ExplosionMaterial;
 use crate::{
     components::{Explosion, Grenade},
@@ -11,6 +11,7 @@ use bevy::prelude::*;
 use bevy::render::mesh::{Indices, PrimitiveTopology};
 use bevy::sprite::AlphaMode2d;
 use protocol::constants::GRENADE_BLAST_RADIUS;
+use protocol::geom::WallGrid;
 
 // ------------------------------------------------------------------------------------------------
 // Рендер детонаций по серверному событию
@@ -21,7 +22,7 @@ pub fn render_detonations(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<ColorMaterial>>,
     q_gren: Query<(Entity, &Grenade)>,
-    wall_q: Query<(&Transform, &Sprite), With<Wall>>, // ← добавили
+    wall_grid: Res<WallGridRes>,
 ) {
     for e in evr.read() {
         if let Some((ent, _)) = q_gren.iter().find(|(_, g)| g.id == e.id) {
@@ -33,7 +34,7 @@ pub fn render_detonations(
             e.pos,
             GRENADE_BLAST_RADIUS,
             96, // сегментов хватит
-            &wall_q,
+            &wall_grid.0,
         ));
 
         let material = materials.add(ColorMaterial {
@@ -47,10 +48,9 @@ pub fn render_detonations(
         commands.spawn((
             Mesh2d(mesh),
             MeshMaterial2d(material),
-            Transform {
-                translation: e.pos.extend(1.0),
-                ..default()
-            },
+            Transform::from_translation(world_to_translation(e.pos, layers::EFFECT)),
+            WorldPos(e.pos),
+            RenderLayer(layers::EFFECT),
             GlobalTransform::default(),
             Visibility::Visible,
             InheritedVisibility::default(),
@@ -70,7 +70,7 @@ fn generate_occluded_explosion_mesh(
     center: Vec2,
     radius: f32,
     segments: usize,
-    wall_q: &Query<(&Transform, &Sprite), With<Wall>>,
+    wall_grid: &WallGrid,
 ) -> Mesh {
     let mut positions = Vec::with_capacity(1 + segments + 1);
     let mut uvs = Vec::with_capacity(1 + segments + 1);
@@ -86,7 +86,7 @@ fn generate_occluded_explosion_mesh(
         let theta = t * std::f32::consts::TAU;
         let dir = Vec2::new(theta.cos(), theta.sin());
 
-        let d = raycast_to_walls(center, dir, radius, wall_q); // обрезка стенами
+        let d = wall_grid.raycast(center, dir, radius); // обрезка стенами
         let x = dir.x * d;
         let y = dir.y * d;
 

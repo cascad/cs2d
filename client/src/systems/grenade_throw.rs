@@ -1,5 +1,6 @@
 use crate::{
     components::LocalPlayer,
+    render::{pointer_world, WorldPos},
     resources::{MyPlayer, grenades::GrenadeCooldown},
     systems::utils::time_in_seconds,
 };
@@ -14,7 +15,7 @@ pub fn grenade_throw(
     keys: Res<ButtonInput<KeyCode>>,
     my: Res<MyPlayer>,
     mut client: ResMut<QuinnetClient>,
-    player_query: Query<&Transform, With<LocalPlayer>>,
+    player_query: Query<&WorldPos, With<LocalPlayer>>,
     windows: Query<&Window>,
     camera_q: Query<(&Camera, &GlobalTransform)>,
     mut grenade_cd: ResMut<GrenadeCooldown>,
@@ -26,20 +27,14 @@ pub fn grenade_throw(
         return;
     }
 
-    let transform = match player_query.single() {
-        Ok(t) => t,
+    let player_pos = match player_query.single() {
+        Ok(wp) => wp.0,
         Err(_) => return,
     };
-    let player_pos = transform.translation.truncate();
 
     let window = match windows.single() {
         Ok(w) => w,
         Err(_) => return,
-    };
-
-    let cursor_screen_pos = match window.cursor_position() {
-        Some(p) => p,
-        None => return,
     };
 
     let (camera, cam_transform) = match camera_q.single() {
@@ -47,9 +42,9 @@ pub fn grenade_throw(
         Err(_) => return,
     };
 
-    let cursor_world = match camera.viewport_to_world_2d(cam_transform, cursor_screen_pos) {
-        Ok(world_pos) => world_pos.trunc(),
-        Err(_) => return,
+    let cursor_world = match pointer_world(window, camera, cam_transform) {
+        Some(world_pos) => world_pos.trunc(),
+        None => return,
     };
 
     let mut dir = cursor_world - player_pos;

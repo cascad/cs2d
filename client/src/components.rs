@@ -1,4 +1,3 @@
-use crate::resources::MyPlayer;
 use bevy::prelude::*;
 
 #[derive(Component)]
@@ -47,6 +46,16 @@ pub struct GrenadeNet {
 #[derive(Component)]
 pub struct Corpse {
     pub timer: Timer, // сколько лежит труп
+}
+
+/// Кратковременный визуал ближнего удара — «прочерк»: узкое лезвие пробегает
+/// по конусу от одного края к другому за время `timer` и гаснет.
+#[derive(Component)]
+pub struct MeleeSwing {
+    pub timer: Timer,
+    pub facing: f32,   // направление взгляда (центр конуса), рад
+    pub half: f32,     // полу-угол конуса = амплитуда прочерка, рад
+    pub dir_sign: f32, // направление прочерка: +1 или -1
 }
 
 // компонент для маркера

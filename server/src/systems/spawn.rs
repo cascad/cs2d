@@ -52,6 +52,7 @@ pub fn process_client_connected(
                 rot: 0.0,
                 stance: Default::default(),
                 hp: 100,
+                ..Default::default()
             },
         );
         spawned.0.insert(*id);

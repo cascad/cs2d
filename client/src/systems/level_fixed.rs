@@ -1,8 +1,11 @@
 use bevy::prelude::*;
+use protocol::level::rasterize_walls;
 use std::collections::HashSet;
 
 use crate::{
-    resources::{SolidTiles, SpawnPoints}, systems::level::Wall,
+    render::{layers, world_to_translation, RenderLayer, WorldPos},
+    resources::{SolidTiles, SpawnPoints},
+    systems::level::Wall,
 };
 
 pub const TILE: f32 = 32.0;
@@ -69,8 +72,8 @@ pub fn create_fixed_level(commands: &mut Commands) -> (SolidTiles, Vec<Vec2>) {
     let h = lines.len() as i32;
     let w = lines[0].len() as i32;
 
-    let mut solid: HashSet<IVec2> = HashSet::new();
     let mut spawns: Vec<Vec2> = Vec::new();
+    let mut wall_aabbs: Vec<(Vec2, Vec2)> = Vec::new();
 
     // сделаем (0,0) по центру карты
     let origin = Vec2::new(-(w as f32) * TILE * 0.5, -(h as f32) * TILE * 0.5);
@@ -83,7 +86,8 @@ pub fn create_fixed_level(commands: &mut Commands) -> (SolidTiles, Vec<Vec2>) {
 
             match ch {
                 '#' => {
-                    solid.insert(IVec2::new(x, y));
+                    let half = Vec2::splat(TILE * 0.5);
+                    wall_aabbs.push((world_xy - half, world_xy + half));
                     // стена (прямоугольник TILE x TILE)
                     commands.spawn((
                         Sprite {
@@ -91,8 +95,10 @@ pub fn create_fixed_level(commands: &mut Commands) -> (SolidTiles, Vec<Vec2>) {
                             custom_size: Some(Vec2::splat(TILE)),
                             ..default()
                         },
-                        Transform::from_translation(world_xy.extend(0.0)),
+                        Transform::from_translation(world_to_translation(world_xy, layers::WALL)),
                         GlobalTransform::default(),
+                        WorldPos(world_xy),
+                        RenderLayer(layers::WALL),
                         Wall, // твой маркер стены
                     ));
                 }
@@ -103,6 +109,11 @@ pub fn create_fixed_level(commands: &mut Commands) -> (SolidTiles, Vec<Vec2>) {
             }
         }
     }
+
+    // Сплошные тайлы движения — через общую функцию protocol::level,
+    // ровно как на сервере (одинаковая коллизия → нет рассинхрона у стен).
+    let mut solid: HashSet<IVec2> = HashSet::new();
+    rasterize_walls(&mut solid, &wall_aabbs, TILE);
 
     return (SolidTiles(solid), spawns);
 }

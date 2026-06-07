@@ -11,6 +11,7 @@ pub enum C2S {
     Goodbye,
     Ping(f64), // отправить метку времени клиента (secs)
     ThrowGrenade(GrenadeEvent),
+    Melee(MeleeEvent),
 }
 
 // ----- Server → Client -----
@@ -52,6 +53,11 @@ pub enum S2C {
         pos: Vec2,
     },
     GrenadeSync { id: u64, pos: Vec2, vel: Vec2, ts: f64 }, // снапшот
+    MeleeFx {
+        attacker_id: u64,
+        from: Vec2,
+        dir: Vec2,
+    },
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -64,11 +70,20 @@ pub struct InputState {
     pub rotation: f32,
     pub stance: Stance,
     pub timestamp: f64,
+    pub block: bool, // удержание блока
+    pub dash: bool,  // запрос рывка на этом тике
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct ShootEvent {
     pub shooter_id: u64,
+    pub dir: Vec2,
+    pub timestamp: f64,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct MeleeEvent {
+    pub attacker_id: u64,
     pub dir: Vec2,
     pub timestamp: f64,
 }
@@ -101,6 +116,8 @@ pub struct PlayerSnapshot {
     pub rotation: f32,
     pub stance: Stance,
     pub hp: i32,
+    pub stamina: f32,
+    pub blocking: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]

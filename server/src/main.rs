@@ -6,8 +6,10 @@ mod resources;
 mod systems;
 mod utils;
 
+use std::time::Duration;
+
 use bevy::{
-    app::ctrlc,
+    app::{ctrlc, ScheduleRunnerPlugin},
     log::{Level, LogPlugin},
     prelude::*,
 };
@@ -21,9 +23,7 @@ use systems::{
     startup::*, timeout::*, update_grenades::*,
 };
 
-use crate::systems::{
-    level_fixed::setup_fixed_level, spawn::process_player_respawn, wall::spawn_level_server,
-};
+use crate::systems::{level_fixed::setup_fixed_level, spawn::process_player_respawn};
 // use systems::{
 //     connection::{handle_disconnections, handle_new_connections},
 //     damage::{DamageEvent, apply_damage},
@@ -64,7 +64,11 @@ fn main() {
             TimerMode::Repeating,
         ))) // 10 Гц
         .add_plugins((
-            MinimalPlugins, // базовый набор
+            // Ограничиваем главный цикл частотой тика (64 Гц).
+            // Иначе ScheduleRunnerPlugin по умолчанию крутит цикл без сна и жрёт ядро на 100%.
+            MinimalPlugins.set(ScheduleRunnerPlugin::run_loop(Duration::from_secs_f32(
+                TICK_DT,
+            ))),
             LogPlugin {
                 // лог-плагин отдельно
                 level: Level::INFO,           // показываем info

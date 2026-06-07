@@ -2,37 +2,31 @@ use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 use bevy_quinnet::client::QuinnetClient;
 use crate::components::{LocalPlayer, Bullet};
-use crate::constants::{BULLET_SPEED, BULLET_TTL};
+use crate::constants::BULLET_SPEED;
+use crate::render::{layers, pointer_world, world_to_translation, RenderLayer, WorldPos};
 use crate::resources::{MyPlayer};
 use crate::systems::utils::time_in_seconds;
 use protocol::messages::{ShootEvent, C2S};
 use protocol::constants::{CH_C2S};
 
 pub fn shoot_mouse(
-    buttons: Res<ButtonInput<MouseButton>>,
+    keys: Res<ButtonInput<KeyCode>>,
     windows: Query<&Window, With<PrimaryWindow>>,
     cam_q: Query<(&Camera, &GlobalTransform)>,
-    player_q: Query<&Transform, With<LocalPlayer>>,
+    player_q: Query<&WorldPos, With<LocalPlayer>>,
     my: Res<MyPlayer>,
     mut client: ResMut<QuinnetClient>,
-    mut commands: Commands,
 ) {
-    if !buttons.just_pressed(MouseButton::Left) {
+    // стрельба перенесена с mouse1 на Left Shift (mouse1 теперь melee)
+    if !keys.just_pressed(KeyCode::ShiftLeft) {
         return;
     }
-    println!("🖱 [Client] Mouse Left pressed");
+    println!("🔫 [Client] Shoot key (LShift) pressed");
 
     let window = match windows.single() {
         Ok(w) => w,
         Err(_) => {
             println!("⚠️ [Client] No window");
-            return;
-        }
-    };
-    let cursor = match window.cursor_position() {
-        Some(c) => c,
-        None => {
-            println!("⚠️ [Client] No cursor pos");
             return;
         }
     };
@@ -43,15 +37,15 @@ pub fn shoot_mouse(
             return;
         }
     };
-    let world = match camera.viewport_to_world_2d(cam_tf, cursor) {
-        Ok(p) => p,
-        Err(_) => {
-            println!("⚠️ [Client] Failed world transform");
+    let world = match pointer_world(window, camera, cam_tf) {
+        Some(p) => p,
+        None => {
+            println!("⚠️ [Client] No cursor/world");
             return;
         }
     };
     let player_pos = match player_q.single() {
-        Ok(t) => t.translation.truncate(),
+        Ok(wp) => wp.0,
         Err(err) => {
             println!("⚠️ [Client] No LocalPlayer: {:?}", err);
             return;
@@ -83,9 +77,11 @@ pub fn spawn_tracer(commands: &mut Commands, from: Vec2, dir: Vec2, ttl:f32) {
             custom_size: Some(Vec2::new(12.0, 2.0)),
             ..default()
         },
-        Transform::from_translation(from.extend(10.0))
+        Transform::from_translation(world_to_translation(from, layers::PROJECTILE))
             .with_rotation(Quat::from_rotation_z(dir.y.atan2(dir.x))),
         GlobalTransform::default(),
+        WorldPos(from),
+        RenderLayer(layers::PROJECTILE),
         Bullet {
             ttl: ttl,
             vel: dir * BULLET_SPEED,

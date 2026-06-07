@@ -1,6 +1,9 @@
 use bevy::prelude::*;
 use bevy_quinnet::server::QuinnetServer;
-use protocol::{constants::CH_S2C, messages::S2C};
+use protocol::{
+    constants::{BLOCK_DAMAGE_MULT, CH_S2C},
+    messages::S2C,
+};
 
 use crate::{
     events::DamageEvent,
@@ -19,12 +22,18 @@ pub fn apply_damage(
     for ev in ev_damage.read() {
         // println!("[DEBUG] damage event player:{:?} {:?}", ev.target, ev.amount);
         if let Some(st) = states.0.get_mut(&ev.target) {
-            st.hp -= ev.amount;
+            // активный блок снижает входящий урон
+            let amount = if st.blocking {
+                ((ev.amount as f32) * BLOCK_DAMAGE_MULT).round() as i32
+            } else {
+                ev.amount
+            };
+            st.hp -= amount;
 
             // todo not work info! here
             println!(
-                "🩸 Player {} took {} dmg (hp={})",
-                ev.target, ev.amount, st.hp
+                "🩸 Player {} took {} dmg (hp={}, blocking={})",
+                ev.target, amount, st.hp, st.blocking
             );
 
             let endpoint = server.endpoint_mut();
@@ -36,7 +45,7 @@ pub fn apply_damage(
                     S2C::PlayerDamaged {
                         id: ev.target,
                         new_hp: st.hp,
-                        damage: ev.amount,
+                        damage: amount,
                     },
                 )
                 .ok();

@@ -70,108 +70,6 @@ fn init_level_bounds(mut commands: Commands) {
     });
 }
 
-fn follow_player_camera_hard(
-    me: Res<MyPlayer>,
-    bounds: Res<LevelBounds>,
-    q_win: Query<&Window, With<PrimaryWindow>>,
-
-    // Берём единственную 2D-камеру, но исключаем игроков (иначе B0001)
-    mut q_cam: Query<(&mut Projection, &mut Transform), (With<Camera2d>, Without<PlayerMarker>)>,
-
-    // Ищем всех игроков, найдём по id
-    q_players: Query<(&Transform, &PlayerMarker)>,
-) {
-    let Ok((mut proj, mut cam_tf)) = q_cam.single_mut() else {
-        return;
-    };
-    let Ok(win) = q_win.single() else {
-        return;
-    };
-
-    // найдём локального игрока по id
-    let mut target: Option<Vec2> = None;
-    for (tf, pm) in &q_players {
-        if pm.0 == me.id {
-            target = Some(tf.translation.truncate());
-            break;
-        }
-    }
-
-    let Some(target) = target else {
-        // на всякий: раскомментируй для диагностики
-        // info!("camera: no player with id={} yet", me.id);
-        return;
-    };
-
-    // Включаем «пиксельную» шкалу, вычисляем половину видимой области
-    let half_view = if let Projection::Orthographic(ortho) = &mut *proj {
-        ortho.scaling_mode = ScalingMode::WindowSize;
-        // гарантируем адекватный стартовый масштаб
-        if ortho.scale < 1.0 {
-            ortho.scale = 1.0;
-        }
-        Vec2::new(win.width(), win.height()) * ortho.scale * 0.5
-    } else {
-        return;
-    };
-
-    // Держим камеру внутри уровня с учётом half_view
-    let min_allowed = bounds.min + half_view;
-    let max_allowed = bounds.max - half_view;
-
-    let clamped = Vec2::new(
-        if min_allowed.x > max_allowed.x {
-            (bounds.min.x + bounds.max.x) * 0.5
-        } else {
-            target.x.clamp(min_allowed.x, max_allowed.x)
-        },
-        if min_allowed.y > max_allowed.y {
-            (bounds.min.y + bounds.max.y) * 0.5
-        } else {
-            target.y.clamp(min_allowed.y, max_allowed.y)
-        },
-    );
-
-    // жёстко ставим камеру
-    cam_tf.translation.x = clamped.x;
-    cam_tf.translation.y = clamped.y;
-
-    // Диагностика (включи, если надо)
-    info!(
-        "cam-> player_id={} target=({:.1},{:.1}) cam=({:.1},{:.1}) hv=({:.1},{:.1})",
-        me.id,
-        target.x,
-        target.y,
-        cam_tf.translation.x,
-        cam_tf.translation.y,
-        half_view.x,
-        half_view.y
-    );
-}
-
-fn snap_camera_on_player_spawn(
-    me: Res<MyPlayer>,
-    mut did: Local<bool>,
-    mut q_cam: Query<&mut Transform, (With<Camera2d>, Without<PlayerMarker>)>,
-    q_players: Query<(&Transform, &PlayerMarker)>,
-) {
-    if *did {
-        return;
-    }
-    let Ok(mut cam_tf) = q_cam.get_single_mut() else {
-        return;
-    };
-    for (tf, pm) in &q_players {
-        if pm.0 == me.id {
-            cam_tf.translation.x = tf.translation.x;
-            cam_tf.translation.y = tf.translation.y;
-            *did = true;
-            info!("Camera snapped to player {}", me.id);
-            break;
-        }
-    }
-}
-
 fn follow_player_camera_smooth(
     me: Res<MyPlayer>,
     bounds: Res<LevelBounds>,
@@ -188,10 +86,10 @@ fn follow_player_camera_smooth(
     // локальное состояние для оценки скорости игрока
     mut last_player_pos: Local<Option<Vec2>>,
 ) {
-    let Ok((mut proj, mut cam_tf)) = q_cam.get_single_mut() else {
+    let Ok((mut proj, mut cam_tf)) = q_cam.single_mut() else {
         return;
     };
-    let Ok(win) = q_win.get_single() else {
+    let Ok(win) = q_win.single() else {
         return;
     };
 

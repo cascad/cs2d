@@ -1,6 +1,8 @@
 mod components;
+mod console;
 mod constants;
 mod events;
+mod render;
 mod resources;
 mod systems;
 mod ui;
@@ -11,8 +13,11 @@ mod menu;
 
 use std::collections::VecDeque;
 
+use bevy::log::{Level, LogPlugin};
 use bevy::prelude::*;
 use bevy_quinnet::client::QuinnetClientPlugin;
+
+use crate::console::{capture_console_layer, setup_console_ui, toggle_console, update_console_ui};
 
 use protocol::constants::TICK_DT;
 use protocol::messages::Stance;
@@ -25,10 +30,11 @@ use systems::{
     grenade_throw::grenade_throw,
     input::change_stance,
     interpolate_with_snapshot::interpolate_with_snapshot,
+    melee::{melee_attack, melee_swing_lifecycle},
     network::receive_server_messages,
     ping::send_ping,
     rotate_to_cursor::rotate_to_cursor,
-    send_input::send_input_and_predict,
+    send_input::{send_input_and_predict, smooth_local_player},
     shoot::shoot_mouse,
     startup::setup,
 };
@@ -43,11 +49,12 @@ use crate::{
     resources::grenades::{ClientGrenades, GrenadeCooldown, GrenadeStates},
     systems::{
         // +++ насос Connecting: ждём первый Snapshot, затем -> InGame +++
-        aim::{spawn_aim_marker, update_aim_to_mouse}, camera::CameraFollowPlugin, connecting_pump::connecting_pump, corpse_lc::corpse_lifecycle, ensure_my_id::ensure_my_id_from_conn, grenade_lifecycle::spawn_grenades, level::fill_solid_tiles_once, level_fixed::setup_fixed_level, network::apply_grenade_net, render_detonations::render_detonations, spawn_damage_popups::{spawn_damage_popups, update_damage_popups}, startup::load_ui_font, sync_hp_ui::{
+        aim::{spawn_aim_marker, update_aim_to_mouse}, camera::CameraFollowPlugin, connecting_pump::connecting_pump, corpse_lc::corpse_lifecycle, ensure_my_id::ensure_my_id_from_conn, fog::{fade_unseen_players, setup_fog, update_fog}, grenade_lifecycle::spawn_grenades, level_fixed::setup_fixed_level, network::apply_grenade_net, render_detonations::render_detonations, spawn_damage_popups::{spawn_damage_popups, update_damage_popups}, startup::load_ui_font, sync_hp_ui::{
             cleanup_hp_ui_on_player_remove, sync_hp_ui_position, update_hp_text_from_event,
         }, walls_cache::build_wall_aabb_cache
     },
     ui::grenade_ui::setup_grenade_ui,
+    ui::stamina_ui::{setup_stamina_ui, update_stamina_ui},
 };
 
 fn main() {
@@ -76,7 +83,12 @@ fn main() {
         .insert_resource(ClientGrenades::default())
         .insert_resource(GrenadeStates::default())
         .insert_resource(WallAabbCache::default())
+        .insert_resource(WallGridRes::default())
         .insert_resource(LastKnownPos::default())
+        .insert_resource(LastSeen::default())
+        .insert_resource(LocalAbilities::default())
+        .insert_resource(LocalStatus::default())
+        .insert_resource(PredictedPos::default())
         // ивенты
         .add_event::<PlayerDamagedEvent>()
         .add_event::<PlayerDied>()
@@ -84,14 +96,23 @@ fn main() {
         .add_event::<GrenadeSpawnEvent>()
         .add_event::<GrenadeDetonatedEvent>()
         // плагины
-        .add_plugins(DefaultPlugins.set(WindowPlugin {
-            primary_window: Some(Window {
-                title: "CS-style Multiplayer Client".into(),
-                resolution: (1024.0, 768.0).into(),
-                ..default()
-            }),
-            ..default()
-        }))
+        .add_plugins(
+            DefaultPlugins
+                .set(WindowPlugin {
+                    primary_window: Some(Window {
+                        title: "CS-style Multiplayer Client".into(),
+                        resolution: (1024.0, 768.0).into(),
+                        ..default()
+                    }),
+                    ..default()
+                })
+                // Захват логов в внутриигровую консоль (тоггл по `~`).
+                .set(LogPlugin {
+                    level: Level::INFO,
+                    filter: "wgpu=error,naga=warn,bevy_render=warn,bevy_winit=warn".into(),
+                    custom_layer: capture_console_layer,
+                }),
+        )
         .add_plugins(QuinnetClientPlugin::default())
         .add_plugins(CameraFollowPlugin)
         // (опционально) сразу включить плавный режим:
@@ -100,7 +121,9 @@ fn main() {
         .insert_state(AppState::Menu)
         .add_plugins(MenuPlugin)
         // --- шрифты грузим заранее (нужны в меню тоже) ---
-        .add_systems(Startup, load_ui_font)
+        .add_systems(Startup, (load_ui_font, setup_console_ui))
+        // --- консоль логов работает в любом состоянии (тоггл по `~`) ---
+        .add_systems(Update, (toggle_console, update_console_ui))
         // --- Connecting: ждём первый снапшот и следим за таймаутом ---
         .add_systems(
             Update,
@@ -115,6 +138,8 @@ fn main() {
                 setup,
                 setup_fixed_level,
                 setup_grenade_ui,
+                setup_stamina_ui,
+                setup_fog,
             ),
         )
         // --- PreUpdate: сетка/инпут и приём сообщений только в InGame ---
@@ -136,7 +161,7 @@ fn main() {
         .add_systems(
             Update,
             (
-                fill_solid_tiles_once,
+                smooth_local_player,
                 interpolate_with_snapshot,
                 bullet_lifecycle,
                 // grenades
@@ -149,7 +174,13 @@ fn main() {
                 rotate_to_cursor,
                 change_stance,
                 shoot_mouse,
+                melee_attack,
+                melee_swing_lifecycle,
                 send_ping,
+                // туман: перестраиваем затемнение от позиции игрока (после движения)
+                update_fog,
+                // проекция мир→экран: ПОСЛЕ всех, кто двигает WorldPos, и ДО камеры
+                crate::render::project_world_to_transform,
             )
                 .chain()
                 .run_if(in_state(AppState::InGame)),
@@ -158,12 +189,14 @@ fn main() {
             Update,
             (
                 update_grenade_cooldown_ui,
+                update_stamina_ui,
                 spawn_damage_popups,
                 update_damage_popups,
                 sync_hp_ui_position,
                 update_hp_text_from_event,
                 cleanup_hp_ui_on_player_remove,
                 corpse_lifecycle,
+                fade_unseen_players,
             )
                 .run_if(in_state(AppState::InGame)),
         )

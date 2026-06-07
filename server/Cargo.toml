@@ -13,3 +13,7 @@ bevy_window = "0.16.1"
 bevy_quinnet = "0.17.0"
 protocol = { path = "../protocol", features = ["quinnet"] }
 serde = "1"
+
+[dev-dependencies]
+bevy = { version = "0.16.1", default-features = false }
+protocol = { path = "../protocol" }

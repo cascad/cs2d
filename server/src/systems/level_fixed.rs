@@ -1,10 +1,16 @@
 use bevy::prelude::*;
 use std::collections::HashSet;
 
+use protocol::geom::WallGrid;
+use protocol::level::rasterize_walls;
+
 use crate::{
-    resources::{SolidTiles, SpawnPoints},
+    resources::{SolidTiles, SpawnPoints, WallAabbs, WallGridRes},
     systems::wall::Wall,
 };
+
+/// Размер ячейки спатиал-сетки стен (кратен тайлу).
+const WALL_GRID_CELL: f32 = TILE * 2.0;
 
 pub const TILE: f32 = 32.0;
 
@@ -64,14 +70,14 @@ fn map_lines() -> &'static [&'static str] {
 }
 
 
-/// Построение уровня: спавнит стены, возвращает SolidTiles и SpawnPoints
-pub fn create_fixed_level(commands: &mut Commands) -> (SolidTiles, Vec<Vec2>) {
+/// Построение уровня: спавнит стены, возвращает SolidTiles, SpawnPoints и AABB стен
+pub fn create_fixed_level(commands: &mut Commands) -> (SolidTiles, Vec<Vec2>, Vec<(Vec2, Vec2)>) {
     let lines = map_lines();
     let h = lines.len() as i32;
     let w = lines[0].len() as i32;
 
-    let mut solid: HashSet<IVec2> = HashSet::new();
     let mut spawns: Vec<Vec2> = Vec::new();
+    let mut wall_aabbs: Vec<(Vec2, Vec2)> = Vec::new();
 
     // сделаем (0,0) по центру карты
     let origin = Vec2::new(-(w as f32) * TILE * 0.5, -(h as f32) * TILE * 0.5);
@@ -84,7 +90,9 @@ pub fn create_fixed_level(commands: &mut Commands) -> (SolidTiles, Vec<Vec2>) {
 
             match ch {
                 '#' => {
-                    solid.insert(IVec2::new(x, y));
+                    // AABB стены (тот же прямоугольник TILE x TILE, что и спрайт)
+                    let half = Vec2::splat(TILE * 0.5);
+                    wall_aabbs.push((world_xy - half, world_xy + half));
                     // стена (прямоугольник TILE x TILE)
                     commands.spawn((
                         Sprite {
@@ -105,13 +113,21 @@ pub fn create_fixed_level(commands: &mut Commands) -> (SolidTiles, Vec<Vec2>) {
         }
     }
 
-    return (SolidTiles(solid), spawns);
+    // Сплошные тайлы движения — растеризуем из тех же AABB, что и на клиенте,
+    // через общую функцию protocol::level (одинаковая коллизия на обеих сторонах).
+    let mut solid: HashSet<IVec2> = HashSet::new();
+    rasterize_walls(&mut solid, &wall_aabbs, TILE);
+
+    return (SolidTiles(solid), spawns, wall_aabbs);
 }
 
 /// Системный сетап: один раз строим уровень и кладём ресурсы
 pub fn setup_fixed_level(mut commands: Commands) {
-    let (solid, spawns) = create_fixed_level(&mut commands);
+    let (solid, spawns, wall_aabbs) = create_fixed_level(&mut commands);
 
+    let grid = WallGrid::build(&wall_aabbs, WALL_GRID_CELL);
     commands.insert_resource(solid);
     commands.insert_resource(SpawnPoints(spawns));
+    commands.insert_resource(WallAabbs(wall_aabbs));
+    commands.insert_resource(WallGridRes(grid));
 }
