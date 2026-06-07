@@ -25,12 +25,14 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
 
-      # Системные библиотеки, нужные Bevy/wgpu для сборки клиента на Linux.
+      # Системные библиотеки, нужные Bevy/wgpu/winit для сборки клиента на Linux
+      # (включая Wayland — иначе wayland-sys падает на этапе pkg-config).
       - name: Install Linux deps
         run: |
           sudo apt-get update
           sudo apt-get install -y pkg-config libasound2-dev libudev-dev libx11-dev \
-            libxi-dev libgl1-mesa-dev libxcb-shape0-dev libxcb-xfixes0-dev
+            libxi-dev libgl1-mesa-dev libxcb-shape0-dev libxcb-xfixes0-dev \
+            libwayland-dev libxkbcommon-dev
 
       - name: cargo test
         run: cargo test --workspace --all-targets
@@ -65,7 +67,8 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y pkg-config libasound2-dev libudev-dev libx11-dev \
-            libxi-dev libgl1-mesa-dev libxcb-shape0-dev libxcb-xfixes0-dev
+            libxi-dev libgl1-mesa-dev libxcb-shape0-dev libxcb-xfixes0-dev \
+            libwayland-dev libxkbcommon-dev
 
       - name: Build (release)
         run: |
