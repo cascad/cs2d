@@ -82,9 +82,16 @@ jobs:
           cp "target/${TGT}/release/${CLIENT_BIN}${{ matrix.bin_ext }}" "$OUT/"
           cp "target/${TGT}/release/${SERVER_BIN}${{ matrix.bin_ext }}" "$OUT/"
 
-          # ассеты рядом с бинарями — так Bevy их найдёт
+          # ассеты рядом с бинарями — так Bevy их найдёт (клиент ищет в каталоге exe)
           if [ -d assets ]; then cp -r assets "$OUT/"; fi
           [ -f README.md ] && cp README.md "$OUT/"
+          cat > "$OUT/HOW_TO_RUN.txt" <<'EOF'
+          CS2D — как запустить:
+            1) Запустите server (server.exe / ./server).
+            2) Запустите client (client.exe / ./client).
+            3) В меню подключитесь к 127.0.0.1 и играйте.
+          ВАЖНО: папка assets должна лежать РЯДОМ с бинарями (как в этом архиве).
+          EOF
 
           cd dist
           ARCH="cs2d_${KIND}_${VER}.zip"

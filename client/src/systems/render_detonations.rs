@@ -8,8 +8,8 @@ use crate::{
 use bevy::asset::RenderAssetUsages;
 use bevy::math::Affine2;
 use bevy::prelude::*;
-use bevy::render::mesh::{Indices, PrimitiveTopology};
-use bevy::sprite::AlphaMode2d;
+use bevy::mesh::{Indices, PrimitiveTopology};
+use bevy::sprite_render::AlphaMode2d;
 use protocol::constants::GRENADE_BLAST_RADIUS;
 use protocol::geom::WallGrid;
 
@@ -18,7 +18,7 @@ use protocol::geom::WallGrid;
 // ------------------------------------------------------------------------------------------------
 pub fn render_detonations(
     mut commands: Commands,
-    mut evr: EventReader<GrenadeDetonatedEvent>,
+    mut evr: MessageReader<GrenadeDetonatedEvent>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<ColorMaterial>>,
     q_gren: Query<(Entity, &Grenade)>,

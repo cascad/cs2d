@@ -6,6 +6,85 @@ pub struct LocalPlayer;
 #[derive(Component)]
 pub struct PlayerMarker(pub u64);
 
+/// Направление взгляда актёра в МИРОВЫХ радианах (как `rotation` в снапшоте/вводе).
+/// Спрайт-направление (1 из 16) выбирается из ЭКРАННОЙ проекции этого угла, чтобы
+/// персонаж смотрел туда же, куда курсор на экране. Заменяет `Transform.rotation`
+/// для отрисовки (направленные спрайты не вращают сам quad).
+#[derive(Component, Clone, Copy, Debug, Default)]
+pub struct Facing(pub f32);
+
+/// Состояние анимации актёра (направленный спрайт-лист рыцаря).
+/// `Idle`/`Walk` зациклены и выбираются по факту движения; `Attack`/`Dash` —
+/// одноразовые (oneshot): проигрываются один раз и возвращаются к idle/walk.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AnimState {
+    Idle,
+    Walk,
+    Attack,
+    Dash,
+    Block,
+}
+
+impl AnimState {
+    /// Одноразовая ли анимация (играется один раз, потом возврат к idle/walk).
+    pub fn is_oneshot(self) -> bool {
+        matches!(self, AnimState::Attack | AnimState::Dash)
+    }
+}
+
+/// Покадровая анимация направленного актёра (рыцарь, лист 8 направлений × N кадров).
+/// Кадр и таймер общие для всех направлений; строка листа (направление) выбирается
+/// каждый кадр из [`Facing`].
+#[derive(Component)]
+pub struct ActorAnim {
+    pub state: AnimState,
+    pub frame: usize,
+    pub timer: Timer,
+    /// Предыдущая мировая позиция — чтобы отличать ходьбу от покоя.
+    pub prev: Vec2,
+    /// Если задано — на время одноразового действия повернуть спрайт в этот
+    /// МИРОВОЙ угол (рад), а не на курсор. Нужно для рывка: рыцарь катится туда,
+    /// КУДА летит, а не куда целится.
+    pub lock_facing: Option<f32>,
+    /// Держим ли блок сейчас (mouse2 установлен). Перебивает idle/walk на
+    /// анимацию блока, пока не идёт одноразовое действие.
+    pub blocking: bool,
+    /// Остаток времени «вспышки урона» (сек): модель краснеет при получении урона
+    /// и плавно возвращается к норме. Видно и на себе, и на других игроках.
+    pub hit_flash: f32,
+}
+
+impl ActorAnim {
+    /// Запустить одноразовое действие (атака/рывок): с нулевого кадра.
+    pub fn start_action(&mut self, state: AnimState) {
+        self.state = state;
+        self.frame = 0;
+        self.timer.reset();
+        self.lock_facing = None;
+    }
+
+    /// Запустить одноразовое действие с фиксированным направлением спрайта
+    /// (мировой угол, рад) — например рывок в сторону движения.
+    pub fn start_action_facing(&mut self, state: AnimState, world_angle: f32) {
+        self.start_action(state);
+        self.lock_facing = Some(world_angle);
+    }
+}
+
+impl Default for ActorAnim {
+    fn default() -> Self {
+        Self {
+            state: AnimState::Idle,
+            frame: 0,
+            timer: Timer::from_seconds(1.0 / 12.0, TimerMode::Repeating),
+            prev: Vec2::ZERO,
+            lock_facing: None,
+            blocking: false,
+            hit_flash: 0.0,
+        }
+    }
+}
+
 #[derive(Component)]
 pub struct Bullet {
     pub ttl: f32,
@@ -14,6 +93,13 @@ pub struct Bullet {
 
 #[derive(Component)]
 pub struct Health(pub i32);
+
+/// Заливка плавающей полоски HP (ребёнок UI-узла над игроком).
+#[derive(Component)]
+pub struct HpFill {
+    pub id: u64,
+    pub full_w: f32,
+}
 
 /// Компонент «летящая граната»
 #[derive(Component)]
@@ -45,22 +131,51 @@ pub struct GrenadeNet {
 
 #[derive(Component)]
 pub struct Corpse {
-    pub timer: Timer, // сколько лежит труп
+    pub row: usize,    // направление (ряд листа) — как смотрел рыцарь в момент смерти
+    pub frame: usize,  // текущий кадр анимации смерти (доходит до конца и держится)
+    pub anim: Timer,   // покадровый таймер проигрывания
+    // срок жизни не задаём: труп лежит, пока не вытеснен лимитом MAX_CORPSES.
 }
 
-/// Кратковременный визуал ближнего удара — «прочерк»: узкое лезвие пробегает
-/// по конусу от одного края к другому за время `timer` и гаснет.
+/// Маркер сущности НЕПИСЯ (скелета) с его серверным id.
 #[derive(Component)]
-pub struct MeleeSwing {
+pub struct NpcMarker(pub u32);
+
+/// Покадровая анимация скелета (8 направлений × 8 кадров отдельными PNG).
+#[derive(Component)]
+pub struct NpcAnim {
+    pub frame: usize,
     pub timer: Timer,
-    pub facing: f32,   // направление взгляда (центр конуса), рад
-    pub half: f32,     // полу-угол конуса = амплитуда прочерка, рад
-    pub dir_sign: f32, // направление прочерка: +1 или -1
+    /// Предыдущая мировая позиция — чтобы крутить ходьбу ТОЛЬКО когда реально
+    /// движется (иначе «марширует на месте», когда снапшоты замерли).
+    pub prev: Vec2,
+}
+
+impl Default for NpcAnim {
+    fn default() -> Self {
+        Self {
+            frame: 0,
+            timer: Timer::from_seconds(1.0 / 10.0, TimerMode::Repeating),
+            prev: Vec2::ZERO,
+        }
+    }
+}
+
+/// Заливка полоски HP над скелетом (ребёнок сущности неписи).
+#[derive(Component)]
+pub struct NpcHpFill {
+    pub id: u32,
+    pub full_w: f32,
 }
 
 // компонент для маркера
 #[derive(Component)]
 pub struct AimMarker;
+
+/// Засечка-указатель направления на кольце под игроком (ребёнок сущности игрока).
+/// Позиция на изо-эллипсе пересчитывается каждый кадр из [`Facing`] родителя.
+#[derive(Component)]
+pub struct DirNotch;
 
 #[derive(Component)]
 pub struct AimLineMarker;

@@ -1,4 +1,4 @@
-use crate::components::PlayerMarker;
+use crate::components::{Facing, PlayerMarker};
 use crate::render::WorldPos;
 use crate::resources::{MyPlayer, SnapshotBuffer, TimeSync};
 use crate::systems::utils::{lerp_angle, time_in_seconds};
@@ -6,7 +6,7 @@ use bevy::prelude::*;
 use std::collections::HashMap;
 
 pub fn interpolate_with_snapshot(
-    mut q: Query<(&mut WorldPos, &mut Transform, &PlayerMarker)>,
+    mut q: Query<(&mut WorldPos, &mut Facing, &PlayerMarker)>,
     buffer: Res<SnapshotBuffer>,
     my: Res<MyPlayer>,
     time_sync: Res<TimeSync>,
@@ -41,7 +41,7 @@ pub fn interpolate_with_snapshot(
     for p in &next.players {
         nmap.insert(p.id, p);
     }
-    for (mut wp, mut t, marker) in q.iter_mut() {
+    for (mut wp, mut facing, marker) in q.iter_mut() {
         if marker.0 == my.id {
             continue;
         }
@@ -49,9 +49,9 @@ pub fn interpolate_with_snapshot(
             let from = Vec2::new(p0.x, p0.y);
             let to = Vec2::new(p1.x, p1.y);
             // позицию пишем в WorldPos (Transform.translation выставит проекция),
-            // а вот вращение остаётся на Transform — его проекция не трогает.
+            // а направление — в Facing (направленный спрайт выберет кадр).
             wp.0 = from.lerp(to, alpha);
-            t.rotation = Quat::from_rotation_z(lerp_angle(p0.rotation, p1.rotation, alpha));
+            facing.0 = lerp_angle(p0.rotation, p1.rotation, alpha);
         }
     }
 }

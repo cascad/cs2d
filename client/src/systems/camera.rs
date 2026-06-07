@@ -1,12 +1,46 @@
 // camera_follow.rs
 use bevy::prelude::*;
-use bevy::render::camera::{Projection, ScalingMode};
+use bevy::camera::{Projection, ScalingMode};
+use bevy::input::mouse::{MouseScrollUnit, MouseWheel};
 use bevy::window::PrimaryWindow;
 
 use crate::app_state::AppState;
 use crate::components::PlayerMarker;
 use crate::resources::MyPlayer;
-use crate::systems::level_fixed::{TILE, map_lines};
+use crate::systems::level_fixed::{TILE, map_dims};
+
+/// Зум камеры (масштаб орто-проекции). Меньше — ближе. Текущее «далеко» = 1.0 —
+/// это максимальное отдаление; колесо мыши приближает до `ZOOM_MIN`.
+pub const ZOOM_MIN: f32 = 0.45;
+pub const ZOOM_MAX: f32 = 1.0;
+const ZOOM_STEP: f32 = 0.08;
+
+#[derive(Resource, Clone, Copy)]
+pub struct CameraZoom {
+    pub scale: f32,
+}
+impl Default for CameraZoom {
+    fn default() -> Self {
+        Self { scale: ZOOM_MAX }
+    }
+}
+
+/// Колесо мыши приближает/отдаляет камеру в пределах [`ZOOM_MIN`, `ZOOM_MAX`].
+fn camera_zoom_input(mut wheel: MessageReader<MouseWheel>, mut zoom: ResMut<CameraZoom>) {
+    let mut delta = 0.0;
+    for ev in wheel.read() {
+        // строки колеса считаем «как есть», пиксели нормируем
+        let amount = match ev.unit {
+            MouseScrollUnit::Line => ev.y,
+            MouseScrollUnit::Pixel => ev.y / 50.0,
+        };
+        delta += amount;
+    }
+    if delta != 0.0 {
+        // вверх (delta>0) = приближаем (scale меньше)
+        zoom.scale = (zoom.scale - delta * ZOOM_STEP).clamp(ZOOM_MIN, ZOOM_MAX);
+    }
+}
 
 // твои типы/функции – поправь путь, если нужны модули:
 
@@ -21,7 +55,12 @@ pub struct CameraFollowPlugin;
 impl Plugin for CameraFollowPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<CameraFollowSettings>() // ← настройки по умолчанию
+            .init_resource::<CameraZoom>()
             .add_systems(OnEnter(AppState::InGame), init_level_bounds)
+            .add_systems(
+                Update,
+                camera_zoom_input.run_if(in_state(AppState::InGame)),
+            )
             .add_systems(
                 PostUpdate,
                 follow_player_camera_smooth.run_if(in_state(AppState::InGame)),
@@ -43,37 +82,48 @@ pub struct CameraFollowSettings {
 impl Default for CameraFollowSettings {
     fn default() -> Self {
         Self {
-            deadzone_frac: Vec2::new(0.30, 0.35),
-            follow_lerp: 10.0,
-            lookahead_time: 0.15,
-            max_lookahead_frac: 0.25,
+            // без «мёртвой зоны»: камера держит игрока по центру, поэтому со всех
+            // сторон видно одинаково и обзор смещается сразу при движении
+            deadzone_frac: Vec2::new(0.0, 0.0),
+            follow_lerp: 20.0,
+            lookahead_time: 0.0,
+            max_lookahead_frac: 0.0,
         }
     }
 }
 
 fn init_level_bounds(mut commands: Commands) {
-    let lines = map_lines();
-    let h = lines.len() as f32;
-    let w = lines
-        .iter()
-        .map(|s| s.chars().count() as f32)
-        .max_by(|a, b| a.total_cmp(b))
-        .unwrap_or(0.0);
+    use crate::render::world_to_screen;
 
-    let size = Vec2::new(w * TILE, h * TILE);
-    let half = size * 0.5;
+    let (cols, rows) = map_dims();
+    let w = cols as f32;
+    let h = rows as f32;
 
-    // было: min = (0,0), max = (w*TILE, h*TILE)
-    commands.insert_resource(LevelBounds {
-        min: -half, // (-w/2, -h/2)
-        max: half,  // ( w/2,  h/2)
-    });
+    let half = Vec2::new(w * TILE, h * TILE) * 0.5;
+
+    // Камера живёт в ЭКРАННЫХ координатах (за ней едет `Transform`, который
+    // выставляет изо-проекция). Поэтому границы — это экранный AABB ромба карты:
+    // проецируем 4 угла и берём min/max.
+    let corners = [
+        world_to_screen(Vec2::new(-half.x, -half.y)),
+        world_to_screen(Vec2::new(half.x, -half.y)),
+        world_to_screen(Vec2::new(half.x, half.y)),
+        world_to_screen(Vec2::new(-half.x, half.y)),
+    ];
+    let mut min = corners[0];
+    let mut max = corners[0];
+    for c in corners.iter().skip(1) {
+        min = min.min(*c);
+        max = max.max(*c);
+    }
+    commands.insert_resource(LevelBounds { min, max });
 }
 
 fn follow_player_camera_smooth(
     me: Res<MyPlayer>,
     bounds: Res<LevelBounds>,
     settings: Res<CameraFollowSettings>,
+    zoom: Res<CameraZoom>,
     time: Res<Time>,
     q_win: Query<&Window, With<PrimaryWindow>>,
 
@@ -105,12 +155,10 @@ fn follow_player_camera_smooth(
         return;
     };
 
-    // half-view в мировых единицах при орто-проекции
+    // half-view в мировых единицах при орто-проекции; масштаб берём из зума
     let half_view = if let Projection::Orthographic(ortho) = &mut *proj {
         ortho.scaling_mode = ScalingMode::WindowSize;
-        if ortho.scale < 1.0 {
-            ortho.scale = 1.0;
-        }
+        ortho.scale = zoom.scale.clamp(ZOOM_MIN, ZOOM_MAX);
         Vec2::new(win.width(), win.height()) * ortho.scale * 0.5
     } else {
         return;

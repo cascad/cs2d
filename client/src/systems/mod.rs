@@ -24,3 +24,5 @@ pub mod camera;
 pub mod aim;
 pub mod melee;
 pub mod fog;
+pub mod iso;
+pub mod npc;

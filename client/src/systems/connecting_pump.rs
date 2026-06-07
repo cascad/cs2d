@@ -21,10 +21,7 @@ pub fn connecting_pump(
     };
 
     // Читаем только чтобы поймать первый Snapshot. Остальные сообщения можно игнорить.
-    while let Some((chan, msg)) = conn.try_receive_message::<S2C>() {
-        if chan != CH_S2C {
-            continue;
-        }
+    while let Some(msg) = conn.try_receive_message_on::<S2C, _>(CH_S2C) {
         match msg {
             S2C::Snapshot(_snap) => {
                 // Сигнал «сервер жив» — снимаем таймер и заходим в игру.
@@ -38,3 +35,4 @@ pub fn connecting_pump(
         }
     }
 }
+

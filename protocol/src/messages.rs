@@ -58,6 +58,20 @@ pub enum S2C {
         from: Vec2,
         dir: Vec2,
     },
+    /// Старт рывка (авторитет сервера): клиент проигрывает анимацию переката для
+    /// этого игрока в направлении `dir`. Гарантирует, что ролл играется ровно
+    /// тогда, когда рывок реально произошёл (без рассинхрона с предсказанием).
+    DashFx {
+        player_id: u64,
+        dir: Vec2,
+    },
+    /// Скелет-непись погиб: клиент проигрывает анимацию смерти (труп) в `facing`.
+    NpcDied {
+        id: u32,
+        x: f32,
+        y: f32,
+        facing: f32,
+    },
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -120,9 +134,22 @@ pub struct PlayerSnapshot {
     pub blocking: bool,
 }
 
+/// Снапшот НЕПИСЯ (скелета) для клиента: позиция, направление, hp и состояние
+/// (идёт ли в атаку — для возможной подсветки/звука; пока просто флаг агра).
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct NpcSnapshot {
+    pub id: u32,
+    pub x: f32,
+    pub y: f32,
+    pub facing: f32,
+    pub hp: i32,
+    pub aggro: bool,
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct WorldSnapshot {
     pub players: Vec<PlayerSnapshot>,
+    pub npcs: Vec<NpcSnapshot>,
     pub server_time: f64,
     pub last_input_seq: HashMap<u64, u32>,
 }

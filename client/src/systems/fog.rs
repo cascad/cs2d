@@ -1,25 +1,27 @@
 //! Клиентская часть тумана войны.
 //!
 //! Безопасность обеспечивается СЕРВЕРОМ (он не присылает невидимых игроков —
-//! см. `server_tick`). Здесь только две вещи поверх этого:
+//! см. `server_tick`). Здесь — только визуал поверх этого:
 //!   1. `fade_unseen_players` — плавно гасит и деспавнит тех, кого сервер
 //!      перестал присылать (вышли из зоны видимости);
-//!   2. `setup_fog`/`update_fog` — «диабловское» затемнение карты: тёмный меш,
-//!      в котором вырезан полигон видимости (360° рейкасты по стенам в радиусе
-//!      VIEW_RADIUS). Радиус совпадает с серверным, чтобы ясная зона на клиенте
-//!      не выходила за пределы того, что реально прислано.
+//!   2. `setup_fog`/`update_fog` — «диабловское» затемнение карты на основе
+//!      ТЕКСТУРЫ тумана (по тайлу карты на тексель). Каждый кадр для каждого
+//!      текселя считаем LOS до игрока (per-tile shadowcasting), сглаживаем
+//!      темпорально (никаких рывков при повороте) и пишем альфу в текстуру.
+//!      Билинейная фильтрация спрайта даёт мягкую границу, а «исследованные,
+//!      но сейчас невидимые» тайлы остаются приглушённо видны (память карты).
 
 use bevy::asset::RenderAssetUsages;
-use bevy::math::Affine2;
+use bevy::image::{Image, ImageSampler};
+use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
-use bevy::render::mesh::{Indices, PrimitiveTopology};
-use bevy::sprite::AlphaMode2d;
-use protocol::constants::VIEW_RADIUS;
-use protocol::geom::WallGrid;
+use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
+use bevy::sprite_render::AlphaMode2d;
 
 use crate::components::{LocalPlayer, PlayerMarker};
-use crate::render::layers;
+use crate::render::{layers, world_to_screen};
 use crate::resources::{LastSeen, MyPlayer, SpawnedPlayers, WallGridRes};
+use crate::systems::level_fixed::{map_dims, TILE};
 use crate::systems::utils::time_in_seconds;
 
 // --- Плавное скрытие пропавших игроков ---
@@ -82,98 +84,229 @@ pub fn fade_unseen_players(
     }
 }
 
-// --- Затемнение карты (полигон видимости) ---
-const FOG_SEGMENTS: usize = 144;
-const FOG_OUTER: f32 = 8000.0; // «бесконечность» — заведомо за пределами экрана
-const FOG_ALPHA: f32 = 0.92;
+// ---------------------------------------------------------------------------
+// Затемнение карты через текстуру тумана (1 тексель = 1 тайл карты).
+// ---------------------------------------------------------------------------
+
+// Туман войны (НЕ чёрный, серый): чётко виден «водораздел» между тем, что игрок
+// сейчас видит, и тем, что вне обзора. Видно сейчас — прозрачно; край обзора —
+// мягко гаснет; вне обзора/за стеной — заметно приглушено серым (но различимо).
+const DARK_VISIBLE: f32 = 0.0; // в куполе обзора и без стены на линии — без затемнения
+const DARK_EXPLORED: f32 = 0.66; // видели раньше / вне конуса — ОТЧЁТЛИВО приглушено
+const DARK_HIDDEN: f32 = 0.92; // никогда не видели — почти чёрно-серым
+
+/// Ближний радиус (мир. ед.), где видно ВСЕГДА, даже вне конуса зрения — игрок
+/// «чувствует» то, что прямо у ног/за спиной вплотную. Небольшой.
+const FOG_NEAR_RADIUS: f32 = 96.0;
+/// Радиус «полной видимости» (мир. ед.): внутри — без затемнения.
+const FOG_VIEW_FULL: f32 = 440.0;
+/// Радиус края обзора (мир. ед.): от `FOG_VIEW_FULL` до него купол мягко гаснет;
+/// дальше считаем «не вижу». Меньше серверного `VIEW_RADIUS` (тот — про анти-чит
+/// куллинг по сети), чтобы граница купола РЕАЛЬНО попадала на экран и была видна.
+const FOG_VIEW_FADE: f32 = 820.0;
+
+/// Цвет тумана (RGB), нейтрально-серый с лёгкой прохладцей: «невидимое» выглядит
+/// серым (по просьбе), а не чёрным и не синим. Заливается один раз; каждый кадр
+/// меняем только альфу.
+const FOG_RGB: [u8; 3] = [22, 23, 27];
+/// Скорость темпорального сглаживания (1/сек). Чем больше — тем резче переходы.
+const FOG_SMOOTH_K: f32 = 12.0;
+/// Сжатие стен при LOS, чтобы луч по грани не давал ложного перекрытия.
+const FOG_EPS: f32 = 0.5;
 
 #[derive(Component)]
 pub struct FogOverlay;
 
+/// Состояние тумана: дискретная сетка по тайлам карты + сглаженная «темнота» и
+/// память «исследованного». Хранится отдельно от текстуры, чтобы сглаживать на CPU.
+#[derive(Resource)]
+pub struct FogState {
+    handle: Handle<Image>,
+    cols: usize,
+    rows: usize,
+    map_w: f32,
+    map_h: f32,
+    darkness: Vec<f32>,
+    explored: Vec<bool>,
+}
+
+impl FogState {
+    /// Мировой центр текселя (ix, iy). iy=0 — верхний ряд (макс. world.y), как в спрайте.
+    #[inline]
+    fn texel_world(&self, ix: usize, iy: usize) -> Vec2 {
+        let x = -self.map_w * 0.5 + (ix as f32 + 0.5) * TILE;
+        let y = self.map_h * 0.5 - (iy as f32 + 0.5) * TILE;
+        Vec2::new(x, y)
+    }
+}
+
 pub fn setup_fog(
     mut commands: Commands,
+    mut images: ResMut<Assets<Image>>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<ColorMaterial>>,
 ) {
-    let mesh = meshes.add(empty_mesh());
-    let material = materials.add(ColorMaterial {
-        color: Color::srgba(0.0, 0.0, 0.0, FOG_ALPHA),
-        alpha_mode: AlphaMode2d::Blend.into(),
-        uv_transform: Affine2::IDENTITY,
-        texture: None,
-    });
-    commands.spawn((
-        Mesh2d(mesh),
-        MeshMaterial2d(material),
-        Transform::from_xyz(0.0, 0.0, layers::FOG),
-        GlobalTransform::default(),
-        Visibility::Visible,
-        InheritedVisibility::default(),
-        ViewVisibility::default(),
-        FogOverlay,
-    ));
-}
+    let (cols, rows) = map_dims();
+    let map_w = cols as f32 * TILE;
+    let map_h = rows as f32 * TILE;
+    let n = cols * rows;
 
-/// Каждый кадр перестраиваем тёмный меш с «дыркой» видимости вокруг игрока.
-pub fn update_fog(
-    player_q: Query<&crate::render::WorldPos, With<LocalPlayer>>,
-    walls: Res<WallGridRes>,
-    fog_q: Query<(&Mesh2d, &mut Transform), With<FogOverlay>>,
-    mut meshes: ResMut<Assets<Mesh>>,
-) {
-    let Ok(wp) = player_q.single() else { return };
-    let mut fog_q = fog_q;
-    let Ok((mesh2d, mut tf)) = fog_q.single_mut() else { return };
-    let center = wp.0;
-    tf.translation.x = center.x;
-    tf.translation.y = center.y;
-    tf.translation.z = layers::FOG;
-    if let Some(mesh) = meshes.get_mut(&mesh2d.0) {
-        rebuild_fog_mesh(mesh, center, &walls.0);
+    // Изначально вся карта «не исследована». RGB — холодный оттенок тумана,
+    // альфа — степень затемнения.
+    let init_alpha = (DARK_HIDDEN * 255.0) as u8;
+    let mut data = vec![0u8; n * 4];
+    for px in data.chunks_exact_mut(4) {
+        px[0] = FOG_RGB[0];
+        px[1] = FOG_RGB[1];
+        px[2] = FOG_RGB[2];
+        px[3] = init_alpha;
     }
-}
 
-fn empty_mesh() -> Mesh {
-    let mut mesh = Mesh::new(
-        PrimitiveTopology::TriangleList,
+    let mut image = Image::new(
+        Extent3d {
+            width: cols as u32,
+            height: rows as u32,
+            depth_or_array_layers: 1,
+        },
+        TextureDimension::D2,
+        data,
+        TextureFormat::Rgba8UnormSrgb,
         RenderAssetUsages::RENDER_WORLD | RenderAssetUsages::MAIN_WORLD,
     );
-    mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, Vec::<[f32; 3]>::new());
-    mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, Vec::<[f32; 3]>::new());
-    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, Vec::<[f32; 2]>::new());
-    mesh.insert_indices(Indices::U32(Vec::new()));
-    mesh
+    // Билинейная фильтрация → мягкая граница тумана при апскейле текселя до тайла.
+    image.sampler = ImageSampler::linear();
+
+    let handle = images.add(image);
+
+    // Туман натягиваем на изо-ромб карты (как пол), а не на экранный
+    // прямоугольник: тогда затемнение совпадает с проекцией пола/стен.
+    // UV: u по world.x слева-направо, v по world.y сверху-вниз (iy=0 — верхний ряд).
+    let hw = map_w * 0.5;
+    let hh = map_h * 0.5;
+    let corners = [
+        (Vec2::new(-hw, hh), [0.0, 0.0]),
+        (Vec2::new(hw, hh), [1.0, 0.0]),
+        (Vec2::new(hw, -hh), [1.0, 1.0]),
+        (Vec2::new(-hw, -hh), [0.0, 1.0]),
+    ];
+    let mut positions: Vec<[f32; 3]> = Vec::with_capacity(4);
+    let mut uvs: Vec<[f32; 2]> = Vec::with_capacity(4);
+    for (w, uv) in corners {
+        let s = world_to_screen(w);
+        positions.push([s.x, s.y, 0.0]);
+        uvs.push(uv);
+    }
+    let mut mesh = Mesh::new(
+        PrimitiveTopology::TriangleList,
+        RenderAssetUsages::RENDER_WORLD,
+    );
+    mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
+    mesh.insert_indices(Indices::U32(vec![0, 1, 2, 0, 2, 3]));
+    let mesh = meshes.add(mesh);
+
+    let mat = materials.add(ColorMaterial {
+        color: Color::WHITE,
+        texture: Some(handle.clone()),
+        alpha_mode: AlphaMode2d::Blend,
+        ..default()
+    });
+
+    commands.spawn((
+        Mesh2d(mesh),
+        MeshMaterial2d(mat),
+        Transform::from_xyz(0.0, 0.0, layers::FOG),
+        FogOverlay,
+    ));
+
+    commands.insert_resource(FogState {
+        handle,
+        cols,
+        rows,
+        map_w,
+        map_h,
+        darkness: vec![DARK_HIDDEN; n],
+        explored: vec![false; n],
+    });
 }
 
-/// Тёмная зона = ВСЁ за пределами полигона видимости. Для каждого углового
-/// сектора строим четырёхугольник от границы видимости (рейкаст по стенам,
-/// ограниченный VIEW_RADIUS) до «бесконечности». Координаты — локальные
-/// относительно игрока (translation энтити = позиция игрока).
-fn rebuild_fog_mesh(mesh: &mut Mesh, center: Vec2, walls: &WallGrid) {
-    let n = FOG_SEGMENTS;
-    let mut inner: Vec<Vec2> = Vec::with_capacity(n + 1);
-    let mut outer: Vec<Vec2> = Vec::with_capacity(n + 1);
-    for i in 0..=n {
-        let a = (i as f32 / n as f32) * std::f32::consts::TAU;
-        let dir = Vec2::new(a.cos(), a.sin());
-        let d = walls.raycast(center, dir, VIEW_RADIUS).min(VIEW_RADIUS);
-        inner.push(dir * d);
-        outer.push(dir * FOG_OUTER);
+/// Каждый кадр пересчитываем видимость по тайлам (LOS до игрока), сглаживаем
+/// темпорально и заливаем альфу в текстуру тумана.
+pub fn update_fog(
+    player_q: Query<&crate::render::WorldPos, With<LocalPlayer>>,
+    aim: Res<crate::resources::AimAngle>,
+    walls: Res<WallGridRes>,
+    time: Res<Time>,
+    mut fog: ResMut<FogState>,
+    mut images: ResMut<Assets<Image>>,
+) {
+    let Ok(wp) = player_q.single() else { return };
+    let player = wp.0;
+    // Конус зрения смотрит туда, КУДА ЦЕЛИТСЯ КУРСОР (мгновенно), а не куда уже
+    // довернулась модель — иначе «светлая зона» не совпадала с вниманием игрока.
+    let face = aim.0;
+
+    let dt = time.delta_secs();
+    let smooth = 1.0 - (-FOG_SMOOTH_K * dt).exp();
+    let fade2 = FOG_VIEW_FADE * FOG_VIEW_FADE;
+    let near2 = FOG_NEAR_RADIUS * FOG_NEAR_RADIUS;
+    let span = (FOG_VIEW_FADE - FOG_VIEW_FULL).max(1.0);
+    // LOS целимся чуть «не доходя» до центра текселя, чтобы грани стен (их центр за
+    // ближней гранью) считались видимыми, а не висели чёрными.
+    let pull = TILE * 0.6;
+
+    let cols = fog.cols;
+    let rows = fog.rows;
+
+    for iy in 0..rows {
+        for ix in 0..cols {
+            let i = iy * cols + ix;
+            let center = fog.texel_world(ix, iy);
+            let to = center - player;
+            let dist2 = to.length_squared();
+
+            // «Сейчас вижу» = внутри края обзора, В КОНУСЕ зрения (не за спиной) И
+            // нет стены на линии взгляда.
+            let in_cone = dist2 <= near2
+                || protocol::combat::in_fov(player, face, center, protocol::constants::VIEW_FOV_HALF_ANGLE);
+            let visible = if dist2 <= fade2 && in_cone {
+                let dist = dist2.sqrt();
+                let test = if dist > pull {
+                    center - to / dist * pull
+                } else {
+                    player
+                };
+                !walls.0.segment_blocked(player, test, FOG_EPS)
+            } else {
+                false
+            };
+
+            if visible {
+                fog.explored[i] = true;
+            }
+            let target = if visible {
+                // мягкий купол: в центре прозрачно, к краю обзора плавно гаснет до
+                // DARK_EXPLORED → виден чёткий «водораздел» вижу/не вижу
+                let dist = dist2.sqrt();
+                let t = ((dist - FOG_VIEW_FULL) / span).clamp(0.0, 1.0);
+                DARK_VISIBLE + t * (DARK_EXPLORED - DARK_VISIBLE)
+            } else if fog.explored[i] {
+                DARK_EXPLORED
+            } else {
+                DARK_HIDDEN
+            };
+            fog.darkness[i] += (target - fog.darkness[i]) * smooth;
+        }
     }
 
-    let mut positions: Vec<[f32; 3]> = Vec::with_capacity(n * 4);
-    let mut indices: Vec<u32> = Vec::with_capacity(n * 6);
-    for i in 0..n {
-        let base = positions.len() as u32;
-        positions.push([inner[i].x, inner[i].y, 0.0]);
-        positions.push([inner[i + 1].x, inner[i + 1].y, 0.0]);
-        positions.push([outer[i + 1].x, outer[i + 1].y, 0.0]);
-        positions.push([outer[i].x, outer[i].y, 0.0]);
-        indices.extend([base, base + 1, base + 2, base, base + 2, base + 3]);
+    // Заливаем в текстуру (изменение через get_mut триггерит реаплоад на GPU).
+    if let Some(img) = images.get_mut(&fog.handle) {
+        if let Some(buf) = img.data.as_mut() {
+            for (i, d) in fog.darkness.iter().enumerate() {
+                let a = (d.clamp(0.0, 1.0) * 255.0) as u8;
+                let o = i * 4;
+                buf[o + 3] = a;
+            }
+        }
     }
-    let vcount = positions.len();
-    mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
-    mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, vec![[0.0, 0.0, 1.0]; vcount]);
-    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, vec![[0.0, 0.0]; vcount]);
-    mesh.insert_indices(Indices::U32(indices));
 }

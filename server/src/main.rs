@@ -19,7 +19,7 @@ use constants::*;
 use events::*;
 use resources::*;
 use systems::{
-    connection::*, damage::*, process_c2s::*, respawn_timers::*, server_tick::*, spawn::*,
+    connection::*, damage::*, npc::*, process_c2s::*, respawn_timers::*, server_tick::*, spawn::*,
     startup::*, timeout::*, update_grenades::*,
 };
 
@@ -63,6 +63,13 @@ fn main() {
             0.1,
             TimerMode::Repeating,
         ))) // 10 Гц
+        .insert_resource(Npcs::default())
+        .insert_resource(NpcIdCounter::default())
+        .insert_resource(NpcRoutes::default())
+        .insert_resource(NpcSpawnPoints::default())
+        .insert_resource(NpcRespawnTimer::default())
+        .insert_resource(PendingMelees::default())
+        .insert_resource(Reveals::default())
         .add_plugins((
             // Ограничиваем главный цикл частотой тика (64 Гц).
             // Иначе ScheduleRunnerPlugin по умолчанию крутит цикл без сна и жрёт ядро на 100%.
@@ -77,13 +84,14 @@ fn main() {
             },
         ))
         .add_plugins(QuinnetServerPlugin::default())
-        .add_event::<ConnectionEvent>() // регистрируем событие в ECS
-        .add_event::<ConnectionLostEvent>() // регистрируем событие в ECS
-        .add_event::<DamageEvent>()
-        .add_event::<ClientConnected>()
-        .add_event::<ClientDisconnected>()
-        .add_event::<PlayerRespawn>()
-        .add_systems(Startup, (start_server, setup_fixed_level).chain()) // spawn_level_server
+        .add_message::<ConnectionEvent>() // регистрируем сообщение в ECS
+        .add_message::<ConnectionLostEvent>() // регистрируем сообщение в ECS
+        .add_message::<DamageEvent>()
+        .add_message::<NpcDamageEvent>()
+        .add_message::<ClientConnected>()
+        .add_message::<ClientDisconnected>()
+        .add_message::<PlayerRespawn>()
+        .add_systems(Startup, (start_server, setup_fixed_level, setup_npcs).chain()) // spawn_level_server
         .add_systems(PreUpdate, (handle_new_connections, handle_disconnections))
         .add_systems(
             Update,
@@ -91,6 +99,8 @@ fn main() {
                 // todo !!!! сделать через ивент handler_disconnections !!!!!!
                 drop_inactive,        // 1. вырубаем «молчунов»
                 process_c2s_messages, // 2. обрабатываем входы (+ Heartbeat/Goodbye)
+                resolve_melees,       // 2.4 урон ближнего боя в середине взмаха
+                npc_ai,               // 2.5 ИИ скелетов (до снапшота)
                 server_tick,          // 3. рассылаем снапшот
                 process_client_connected,
                 process_client_disconnected,

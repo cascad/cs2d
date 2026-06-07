@@ -5,9 +5,9 @@
 use bevy::{
     asset::RenderAssetUsages,
     math::Affine2,
+    mesh::{Indices, PrimitiveTopology},
     prelude::*,
-    render::mesh::{Indices, PrimitiveTopology},
-    sprite::AlphaMode2d,
+    sprite_render::AlphaMode2d,
 };
 
 use crate::{
@@ -23,7 +23,7 @@ use protocol::constants::GRENADE_BLAST_RADIUS;
 // ------------------------------------------------------------------------------------------------
 pub fn spawn_grenades(
     mut commands: Commands,
-    mut evr: EventReader<GrenadeSpawnEvent>,
+    mut evr: MessageReader<GrenadeSpawnEvent>,
     mut materials: ResMut<Assets<ColorMaterial>>,
     mut meshes: ResMut<Assets<Mesh>>,
 ) {
@@ -97,7 +97,7 @@ pub fn explosion_lifecycle(
         if let Some(material) = materials.get_mut(&mat.0) {
             material.color.set_alpha(1.0 - t);
         }
-        if exp.timer.finished() {
+        if exp.timer.is_finished() {
             commands.entity(ent).despawn();
         }
     }

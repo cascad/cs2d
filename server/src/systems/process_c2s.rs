@@ -1,18 +1,27 @@
-use crate::events::DamageEvent;
+use crate::events::{DamageEvent, NpcDamageEvent};
 use crate::resources::{
-    AppliedSeqs, GrenadeState, Grenades, LastGrenadeThrows, LastHeard, PendingInputs, PlayerStates,
-    SnapshotHistory, WallGridRes,
+    AppliedSeqs, GrenadeState, Grenades, LastGrenadeThrows, LastHeard, Npcs, PendingInputs,
+    PendingMelee, PendingMelees, PlayerStates, SnapshotHistory, WallGridRes,
 };
 use crate::utils::check_hit_lag_comp;
 use bevy::prelude::*;
 use bevy_quinnet::server::QuinnetServer;
 use protocol::abilities::AbilityConfig;
-use protocol::combat::in_melee_arc;
+use protocol::combat::in_melee_swath;
 use protocol::constants::{
     CH_C2S, CH_S2C, GRENADE_RADIUS, GRENADE_USAGE_COOLDOWN, HITBOX_RADIUS, MAX_LAG_COMP,
-    MELEE_DAMAGE, MELEE_HALF_ANGLE, MELEE_RANGE, SHOOT_RIFLE_DAMAGE,
+    MELEE_DAMAGE, MELEE_HALF_WIDTH, MELEE_HIT_DELAY, MELEE_RANGE, NPC_RADIUS, SHOOT_RIFLE_DAMAGE,
 };
 use protocol::messages::{C2S, GrenadeEvent, S2C, ShootFx};
+
+/// Анти-DoS: максимум входящих сообщений, обрабатываемых от одного клиента за один
+/// вызов системы. Флудер не сможет загнать сервер в busy-loop — лишнее отбрасываем,
+/// оно либо подождёт следующего тика, либо отвалится по лимитам очереди транспорта.
+const MAX_MSGS_PER_CLIENT_PER_TICK: usize = 256;
+/// Анти-DoS: максимум буферизованных инпутов на клиента. `server_tick` всё равно
+/// берёт только последний (`queue.back()`), поэтому держать больше бессмысленно —
+/// при переполнении выкидываем самые старые.
+const MAX_PENDING_INPUTS: usize = 16;
 
 pub fn process_c2s_messages(
     mut server: ResMut<QuinnetServer>,
@@ -23,7 +32,8 @@ pub fn process_c2s_messages(
     history: Res<SnapshotHistory>,
     mut grenades: ResMut<Grenades>,
     mut last_grenade: ResMut<LastGrenadeThrows>,
-    mut damage_events: EventWriter<DamageEvent>,
+    mut damage_events: MessageWriter<DamageEvent>,
+    mut pending_melees: ResMut<PendingMelees>,
     walls: Res<WallGridRes>,
     time: Res<Time>,
 ) {
@@ -31,15 +41,26 @@ pub fn process_c2s_messages(
     let endpoint = server.endpoint_mut();
 
     for client_id in endpoint.clients() {
-        while let Some((chan, msg)) = endpoint.try_receive_message_from::<C2S>(client_id) {
-            debug_assert_eq!(chan, CH_C2S);
+        let mut processed = 0usize;
+        while let Some(msg) = endpoint.try_receive_message_from::<C2S, _>(client_id, CH_C2S) {
+            // АНТИ-DoS: ограничиваем число сообщений от одного клиента за тик.
+            processed += 1;
+            if processed > MAX_MSGS_PER_CLIENT_PER_TICK {
+                warn!("client {client_id}: превышен лимит сообщений за тик — троттлим");
+                break;
+            }
 
             // помечаем время последнего сообщения
             last_heard.0.insert(client_id, now);
 
             match msg {
                 C2S::Input(input) => {
-                    pending.0.entry(client_id).or_default().push_back(input);
+                    let q = pending.0.entry(client_id).or_default();
+                    q.push_back(input);
+                    // держим только свежие инпуты (server_tick всё равно берёт back()).
+                    while q.len() > MAX_PENDING_INPUTS {
+                        q.pop_front();
+                    }
                 }
                 C2S::Shoot(mut shoot) => {
                     // АНТИ-ЧИТ: не доверяем shooter_id из пакета — берём id соединения.
@@ -58,6 +79,8 @@ pub fn process_c2s_messages(
                             target: hit,
                             amount: SHOOT_RIFLE_DAMAGE as i32,
                             source: Some(shoot.shooter_id),
+                            source_pos: None,
+                            npc_source: None,
                         });
                     }
 
@@ -68,9 +91,9 @@ pub fn process_c2s_messages(
                             dir: shoot.dir,
                             timestamp: shoot.timestamp,
                         };
-                        endpoint
-                            .broadcast_message_on(CH_S2C, S2C::ShootFx(fx))
-                            .unwrap();
+                        if let Err(e) = endpoint.broadcast_message_on(CH_S2C, S2C::ShootFx(fx)) {
+                            warn!("broadcast ShootFx failed: {e:?}");
+                        }
                     }
                 }
                 C2S::Heartbeat => {
@@ -186,30 +209,18 @@ pub fn process_c2s_messages(
                         Vec2::new(rot.cos(), rot.sin())
                     };
 
-                    // цели в секторе перед атакующим, не закрытые стеной
-                    let mut victims: Vec<u64> = Vec::new();
-                    for (&tid, tst) in states.0.iter() {
-                        if tid == client_id {
-                            continue;
-                        }
-                        if in_melee_arc(from, dir, tst.pos, HITBOX_RADIUS, MELEE_RANGE, MELEE_HALF_ANGLE)
-                            && !walls.0.segment_blocked(from, tst.pos, 0.001)
-                        {
-                            victims.push(tid);
-                        }
-                    }
-
-                    // фиксируем удар (кулдаун + стамина) и наносим урон
+                    // фиксируем удар (кулдаун + стамина) сразу — но УРОН наносим
+                    // позже, в середине анимации (resolve_melees). Это исключает
+                    // «мгновенный» урон по клику и даёт корректное попадание по
+                    // движущимся целям (считаем по их позициям на момент взмаха).
                     if let Some(att) = states.0.get_mut(&client_id) {
                         att.abilities.consume_melee(&cfg);
                     }
-                    for v in &victims {
-                        damage_events.write(DamageEvent {
-                            target: *v,
-                            amount: MELEE_DAMAGE as i32,
-                            source: Some(client_id),
-                        });
-                    }
+                    pending_melees.0.push(PendingMelee {
+                        attacker: client_id,
+                        dir,
+                        resolve_at: now + MELEE_HIT_DELAY,
+                    });
 
                     endpoint
                         .broadcast_message_on(
@@ -227,4 +238,60 @@ pub fn process_c2s_messages(
     }
     // История состояний пишется в server_tick (раз в тик). Здесь повторная запись
     // только плодила бы клон всей карты состояний каждый кадр.
+}
+
+/// Наносит урон от запланированных ударов, когда подошёл момент «середины
+/// взмаха». Зона — ПОЛОСА постоянной ширины от ЦЕНТРА атакующего (capsule), цели
+/// считаем по их ТЕКУЩИМ позициям → меньше «промахов» по движущимся скелетам.
+pub fn resolve_melees(
+    mut pending: ResMut<PendingMelees>,
+    states: Res<PlayerStates>,
+    npcs: Res<Npcs>,
+    walls: Res<WallGridRes>,
+    time: Res<Time>,
+    mut damage_events: MessageWriter<DamageEvent>,
+    mut npc_damage_events: MessageWriter<NpcDamageEvent>,
+) {
+    let now = time.elapsed_secs_f64();
+    // запас по радиусу неписи: они движутся и видны клиенту с задержкой интерполяции
+    const NPC_MELEE_HITBOX: f32 = HITBOX_RADIUS + NPC_RADIUS;
+
+    let mut keep: Vec<PendingMelee> = Vec::with_capacity(pending.0.len());
+    for m in pending.0.drain(..) {
+        if now < m.resolve_at {
+            keep.push(m);
+            continue;
+        }
+        // атакующий мог отключиться/умереть — тогда удар «растворяется»
+        let Some(att) = states.0.get(&m.attacker) else { continue };
+        let from = att.pos; // строго от ЦЕНТРА модели
+
+        for (&tid, tst) in states.0.iter() {
+            if tid == m.attacker {
+                continue;
+            }
+            if in_melee_swath(from, m.dir, tst.pos, HITBOX_RADIUS, MELEE_RANGE, MELEE_HALF_WIDTH)
+                && !walls.0.segment_blocked(from, tst.pos, 0.001)
+            {
+                damage_events.write(DamageEvent {
+                    target: tid,
+                    amount: MELEE_DAMAGE as i32,
+                    source: Some(m.attacker),
+                    source_pos: None,
+                    npc_source: None,
+                });
+            }
+        }
+        for (&nid, npc) in npcs.0.iter() {
+            if in_melee_swath(from, m.dir, npc.pos, NPC_MELEE_HITBOX, MELEE_RANGE, MELEE_HALF_WIDTH)
+                && !walls.0.segment_blocked(from, npc.pos, 0.001)
+            {
+                npc_damage_events.write(NpcDamageEvent {
+                    target: nid,
+                    amount: MELEE_DAMAGE as i32,
+                });
+            }
+        }
+    }
+    pending.0 = keep;
 }

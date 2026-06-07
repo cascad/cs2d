@@ -1,0 +1,100 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # 1) Прогон всех тестов воркспейса (логика протокола/сервера/клиента).
+  test:
+    name: Test (linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      # Системные библиотеки, нужные Bevy/wgpu для сборки клиента на Linux.
+      - name: Install Linux deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libasound2-dev libudev-dev libx11-dev \
+            libxi-dev libgl1-mesa-dev libxcb-shape0-dev libxcb-xfixes0-dev
+
+      - name: cargo test
+        run: cargo test --workspace --all-targets
+
+  # 2) Сборка релизных бинарей + упаковка в готовый к запуску комплект
+  #    (client + server + папка assets рядом). Артефакт скачивается как zip.
+  package:
+    name: Package ${{ matrix.kind }}
+    needs: test
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            kind: windows-x86_64
+            bin_ext: .exe
+          - os: ubuntu-latest
+            kind: linux-x86_64
+            bin_ext: ""
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install Linux deps
+        if: startsWith(matrix.os, 'ubuntu-')
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libasound2-dev libudev-dev libx11-dev \
+            libxi-dev libgl1-mesa-dev libxcb-shape0-dev libxcb-xfixes0-dev
+
+      - name: Build (release)
+        run: |
+          cargo build --release --bin client
+          cargo build --release --bin server
+
+      - name: Assemble package
+        shell: bash
+        run: |
+          set -eux
+          OUT="dist/cs2d-${{ matrix.kind }}"
+          mkdir -p "$OUT"
+          cp "target/release/client${{ matrix.bin_ext }}" "$OUT/"
+          cp "target/release/server${{ matrix.bin_ext }}" "$OUT/"
+          # Ассеты кладём РЯДОМ с бинарями — клиент ищет их в каталоге exe.
+          cp -r assets "$OUT/"
+          cat > "$OUT/HOW_TO_RUN.txt" <<'EOF'
+          CS2D — как запустить:
+            1) Запустите server (server.exe / ./server) — он держит игровой мир.
+            2) Запустите client (client.exe / ./client).
+            3) В меню подключитесь к 127.0.0.1 и играйте.
+
+          ВАЖНО: папка assets должна лежать РЯДОМ с бинарями (как в этом архиве).
+          Тогда все шрифты/спрайты подхватятся автоматически.
+          EOF
+
+      - name: Upload package artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: cs2d-${{ matrix.kind }}
+          path: dist/cs2d-${{ matrix.kind }}
+          if-no-files-found: error

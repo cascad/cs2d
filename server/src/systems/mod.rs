@@ -9,3 +9,4 @@ pub mod spawn;
 pub mod respawn_timers;
 pub mod wall;
 pub mod level_fixed;
+pub mod npc;

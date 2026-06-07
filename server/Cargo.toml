@@ -8,12 +8,12 @@ name = "server"
 path = "src/main.rs"
 
 [dependencies]
-bevy = { version = "0.16.1", default-features = false, features = ["bevy_asset", "bevy_render", "bevy_sprite"] }
-bevy_window = "0.16.1"
-bevy_quinnet = "0.17.0"
+bevy = { version = "0.18", default-features = false, features = ["bevy_asset", "bevy_render", "bevy_sprite"] }
+bevy_window = "0.18"
+bevy_quinnet = { version = "0.20.0", features = ["bincode-messages"] }
 protocol = { path = "../protocol", features = ["quinnet"] }
 serde = "1"
 
 [dev-dependencies]
-bevy = { version = "0.16.1", default-features = false }
+bevy = { version = "0.18", default-features = false }
 protocol = { path = "../protocol" }

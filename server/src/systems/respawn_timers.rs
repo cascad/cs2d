@@ -8,7 +8,7 @@ use crate::{
 /// шлём внутриресурсное событие PlayerRespawn
 pub fn process_respawn_timers(
     mut respawn_q:  ResMut<RespawnQueue>,
-    mut respawn_ev: EventWriter<PlayerRespawn>,
+    mut respawn_ev: MessageWriter<PlayerRespawn>,
     time:            Res<Time>,
 ) {
     let now = time.elapsed_secs_f64();

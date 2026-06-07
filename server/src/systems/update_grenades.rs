@@ -16,7 +16,7 @@ use protocol::messages::S2C;
 pub fn update_grenades(
     mut grenades: ResMut<Grenades>,
     states: Res<PlayerStates>,
-    mut damage_events: EventWriter<DamageEvent>,
+    mut damage_events: MessageWriter<DamageEvent>,
     time: Res<Time>,
     walls: Res<WallAabbs>,
     wall_grid: Res<WallGridRes>,
@@ -94,6 +94,8 @@ pub fn update_grenades(
                         target: pid,
                         amount: base_damage as i32,
                         source: Some(gs.ev.id),
+                        source_pos: None,
+                        npc_source: None,
                     });
                 }
             }

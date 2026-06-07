@@ -204,16 +204,166 @@ impl WallGrid {
     /// ОБЩИЙ код предсказания клиента, реплея реконсиляции и авторитета сервера —
     /// благодаря этому позиции сходятся, а у стен нет «отброса».
     pub fn slide_circle(&self, pos: Vec2, delta: Vec2, radius: f32) -> Vec2 {
-        let mut new = pos;
-        let px = Vec2::new(pos.x + delta.x, pos.y);
-        if !self.circle_blocked(px, radius) {
-            new.x = px.x;
+        // Сначала выталкиваем из любого перекрытия со стеной: если круг хоть на
+        // волос «утоплен» (например, после коррекции позиции или из-за округлений
+        // float), скольжение ломалось — игрок ЗАЛИПАЛ. Депенетрация это исключает.
+        let mut p = self.depenetrate(pos, radius);
+
+        // Подшаги против туннелирования сквозь тонкие тайлы при большом delta
+        // (рывок). Обычный шаг за тик мал — обычно 1 подшаг.
+        let dist = delta.length();
+        let steps = (dist / radius.max(1.0)).ceil().max(1.0) as i32;
+        let chunk = delta / steps as f32;
+        for _ in 0..steps {
+            p = self.collide_and_slide(p, chunk, radius);
         }
-        let py = Vec2::new(new.x, pos.y + delta.y);
-        if !self.circle_blocked(py, radius) {
-            new.y = py.y;
+        p
+    }
+
+    /// «Collide-and-slide»: двигаемся вдоль `delta`; упёрлись — берём НОРМАЛЬ
+    /// контакта (от ближайшей точки стены к центру) и скользим по касательной;
+    /// повторяем (до 3 контактов). Ключ к выпуклым углам: у вершины нормаль
+    /// РАДИАЛЬНА (от точки-вершины), поэтому круг огибает угол по дуге, а не
+    /// залипает (раздельное движение по осям так не умело). Узкие щели по-прежнему
+    /// не пропускают — свип консервативен (в стену не входим).
+    fn collide_and_slide(&self, pos: Vec2, delta: Vec2, radius: f32) -> Vec2 {
+        let mut p = pos;
+        let mut remaining = delta;
+        for _ in 0..3 {
+            if remaining.length_squared() < 1e-10 {
+                break;
+            }
+            let (np, blocked, t) = self.sweep(p, remaining, radius);
+            p = np;
+            if !blocked {
+                break;
+            }
+            let leftover = remaining * (1.0 - t);
+            let n = self.contact_normal(p, radius);
+            if n.length_squared() < 1e-10 {
+                break;
+            }
+            // убираем составляющую В стену — остаётся скольжение вдоль (касательная)
+            remaining = leftover - n * leftover.dot(n);
         }
-        new
+        p
+    }
+
+    /// Консервативный «свип»: двигает круг вдоль `delta` максимально далеко без
+    /// пересечения стен (детерминированная бисекция). Возвращает (новая позиция,
+    /// упёрлись ли, доля `t` пройденного пути).
+    fn sweep(&self, from: Vec2, delta: Vec2, radius: f32) -> (Vec2, bool, f32) {
+        let target = from + delta;
+        if !self.circle_blocked(target, radius) {
+            return (target, false, 1.0);
+        }
+        let mut lo = 0.0f32; // свободно
+        let mut hi = 1.0f32; // заблокировано
+        let mut best = 0.0f32;
+        for _ in 0..10 {
+            let mid = (lo + hi) * 0.5;
+            if self.circle_blocked(from + delta * mid, radius) {
+                hi = mid;
+            } else {
+                lo = mid;
+                best = mid;
+            }
+        }
+        (from + delta * best, true, best)
+    }
+
+    /// Нормаль контакта = направление от ближайшей точки СТЕН к центру круга.
+    /// Плоская грань → ось; ВЫПУКЛЫЙ угол → радиус от вершины (нужно для огибания).
+    fn contact_normal(&self, center: Vec2, radius: f32) -> Vec2 {
+        let probe = radius + 1.0;
+        let min = center - Vec2::splat(probe);
+        let max = center + Vec2::splat(probe);
+        let c0 = world_to_cell(min, self.cell);
+        let c1 = world_to_cell(max, self.cell);
+        let mut best_d2 = f32::INFINITY;
+        let mut best_n = Vec2::ZERO;
+        for cx in c0.x..=c1.x {
+            for cy in c0.y..=c1.y {
+                let Some(idxs) = self.buckets.get(&IVec2::new(cx, cy)) else { continue };
+                for &wi in idxs {
+                    let (wmin, wmax) = self.walls[wi as usize];
+                    let closest = center.clamp(wmin, wmax);
+                    let d = center - closest;
+                    let d2 = d.length_squared();
+                    if d2 < best_d2 {
+                        best_d2 = d2;
+                        best_n = d;
+                    }
+                }
+            }
+        }
+        if best_d2 > 1e-8 {
+            best_n / best_d2.sqrt()
+        } else {
+            Vec2::ZERO
+        }
+    }
+
+    /// Выталкивает круг из всех перекрывающихся стен по минимальному смещению.
+    /// Детерминированно (фикс. число итераций) — одинаково на клиенте и сервере.
+    fn depenetrate(&self, pos: Vec2, radius: f32) -> Vec2 {
+        if self.walls.is_empty() {
+            return pos;
+        }
+        let mut p = pos;
+        for _ in 0..4 {
+            let min = p - Vec2::splat(radius);
+            let max = p + Vec2::splat(radius);
+            let c0 = world_to_cell(min, self.cell);
+            let c1 = world_to_cell(max, self.cell);
+            // ищем самое глубокое перекрытие и выталкиваем из него
+            let mut worst = 0.0f32;
+            let mut push = Vec2::ZERO;
+            for cx in c0.x..=c1.x {
+                for cy in c0.y..=c1.y {
+                    let Some(idxs) = self.buckets.get(&IVec2::new(cx, cy)) else { continue };
+                    for &wi in idxs {
+                        let (wmin, wmax) = self.walls[wi as usize];
+                        let closest = p.clamp(wmin, wmax);
+                        let d = p - closest;
+                        let dist2 = d.length_squared();
+                        if dist2 < radius * radius {
+                            let dist = dist2.sqrt();
+                            let pen = radius - dist;
+                            if pen > worst {
+                                worst = pen;
+                                push = if dist > 1e-4 {
+                                    // выталкиваем наружу по нормали к ближайшей точке
+                                    d / dist * (pen + 1e-3)
+                                } else {
+                                    // центр внутри прямоугольника — выходим через
+                                    // ближайшую грань (минимальное проникновение)
+                                    let to_left = p.x - wmin.x;
+                                    let to_right = wmax.x - p.x;
+                                    let to_bot = p.y - wmin.y;
+                                    let to_top = wmax.y - p.y;
+                                    let m = to_left.min(to_right).min(to_bot).min(to_top);
+                                    if m == to_left {
+                                        Vec2::new(-(to_left + radius + 1e-3), 0.0)
+                                    } else if m == to_right {
+                                        Vec2::new(to_right + radius + 1e-3, 0.0)
+                                    } else if m == to_bot {
+                                        Vec2::new(0.0, -(to_bot + radius + 1e-3))
+                                    } else {
+                                        Vec2::new(0.0, to_top + radius + 1e-3)
+                                    }
+                                };
+                            }
+                        }
+                    }
+                }
+            }
+            if worst <= 0.0 {
+                break;
+            }
+            p += push;
+        }
+        p
     }
 
     /// Дистанция до ближайшей стены вдоль `dir` (нормализованного) либо `max_dist`.
@@ -575,13 +725,47 @@ mod tests {
     }
 
     #[test]
+    fn overlapping_circle_can_still_slide_along_wall() {
+        // Круг чуть «утоплен» в вертикальную стену (x∈[100,150]) и движется ВДОЛЬ
+        // неё (+Y) с лёгкой составляющей В стену (+X). Не должен залипать.
+        let grid = WallGrid::build(&[(Vec2::new(100.0, 0.0), Vec2::new(150.0, 400.0))], 64.0);
+        let r = 16.0;
+        // центр на x=85 → ближайшая точка (100,*), dist=15 < 16 → перекрытие
+        let mut pos = Vec2::new(85.0, 50.0);
+        for _ in 0..40 {
+            pos = grid.slide_circle(pos, Vec2::new(2.0, 5.0), r);
+        }
+        assert!(pos.y > 150.0, "должен скользить вверх вдоль стены, а не залипнуть: {pos:?}");
+        assert!(pos.x + r <= 100.0 + 1e-2, "не должен оставаться внутри стены: {pos:?}");
+    }
+
+    #[test]
+    fn slides_around_convex_corner_not_stuck() {
+        // Один тайл-стена [0,32]^2; её НИЖНЕ-ЛЕВЫЙ угол (0,0) — выпуклый, торчит к
+        // игроку из квадранта (−,−). Игрок подходит к углу почти по диагонали, но
+        // чуть в сторону (не строго в вершину) — должен ОБОГНУТЬ угол, а не залипнуть.
+        let grid = WallGrid::build(&[(Vec2::new(0.0, 0.0), Vec2::splat(32.0))], 64.0);
+        let r = 16.0;
+        let mut pos = Vec2::new(-30.0, -10.0);
+        // движение вверх-вправо со смещением: преобладает +X (вдоль нижней грани)
+        for _ in 0..80 {
+            pos = grid.slide_circle(pos, Vec2::new(5.0, 2.0), r);
+        }
+        // должен проскользить мимо угла далеко вправо, а не застрять у вершины
+        assert!(pos.x > 60.0, "должен обогнуть выпуклый угол и уйти вправо: {pos:?}");
+    }
+
+    #[test]
     fn slide_circle_slides_along_wall_no_throwback() {
         // движение по диагонали в стену слева: X упирается, Y скользит.
         let grid = WallGrid::build(&[(Vec2::new(0.0, 0.0), Vec2::new(32.0, 200.0))], 64.0);
         let r = 16.0;
         let start = Vec2::new(-17.0, 10.0); // вплотную слева, без перекрытия
         let p = grid.slide_circle(start, Vec2::new(5.0, 5.0), r);
-        assert!((p.x - start.x).abs() < 1e-3, "X должно блокироваться: {p:?}");
+        // X не пробивает стену (правый край ≤ 0) и не отбрасывает назад, но может
+        // «прижаться» вплотную (до x≈-16); Y свободно скользит.
+        assert!(p.x + r <= 1e-3, "X не должен пробивать стену: {p:?}");
+        assert!(p.x >= start.x - 1e-3, "X не должен отбрасывать назад: {p:?}");
         assert!((p.y - 15.0).abs() < 1e-3, "Y должно скользить: {p:?}");
     }
 }

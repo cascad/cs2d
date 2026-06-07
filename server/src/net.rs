@@ -1,14 +1,14 @@
-use bevy_quinnet::shared::channels::{ChannelKind, ChannelsConfiguration};
+use bevy_quinnet::shared::channels::{ChannelConfig, SendChannelsConfiguration};
 use protocol::channels::{CHANNELS, Reliability};
 
-/// Собираем `ChannelsConfiguration` из описания протокола
-pub fn channels_config() -> ChannelsConfiguration {
+/// Собираем `SendChannelsConfiguration` из описания протокола
+pub fn channels_config() -> SendChannelsConfiguration {
     let kinds = CHANNELS.iter().map(|desc| match desc.reliability {
         Reliability::OrderedReliable { max_frame_size } =>
-            ChannelKind::OrderedReliable { max_frame_size },
+            ChannelConfig::OrderedReliable { max_frame_size },
         Reliability::UnorderedReliable { max_frame_size } =>
-            ChannelKind::UnorderedReliable { max_frame_size },
+            ChannelConfig::UnorderedReliable { max_frame_size },
     }).collect::<Vec<_>>();
 
-    ChannelsConfiguration::from_types(kinds).expect("invalid channel config")
+    SendChannelsConfiguration::from_configs(kinds).expect("invalid channel config")
 }

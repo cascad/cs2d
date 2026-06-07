@@ -1,20 +1,23 @@
 use bevy::prelude::*;
 
 use crate::components::Corpse;
+use crate::systems::iso::KNIGHT_COLS;
 
+/// Жизненный цикл трупа: проигрываем анимацию смерти рыцаря один раз (кадры
+/// доходят до последнего и замирают). Труп НЕ исчезает по таймеру — лежит, пока
+/// его не вытеснит лимит трупов (см. `Corpses`/`MAX_CORPSES`).
 pub fn corpse_lifecycle(
     time: Res<Time>,
-    mut q: Query<(Entity, &mut Corpse, &mut Sprite)>,
-    mut commands: Commands,
+    mut q: Query<(&mut Corpse, &mut Sprite)>,
 ) {
-    for (ent, mut corpse, mut spr) in q.iter_mut() {
-        corpse.timer.tick(time.delta());
-        // мягкое затухание альфы
-        let t = corpse.timer.elapsed_secs() / corpse.timer.duration().as_secs_f32();
-        spr.color.set_alpha(1.0 - t.clamp(0.0, 1.0));
-
-        if corpse.timer.finished() {
-            commands.entity(ent).despawn();
+    let dt = time.delta();
+    for (mut corpse, mut spr) in q.iter_mut() {
+        // покадровое проигрывание до последнего кадра, затем удержание
+        if corpse.frame + 1 < KNIGHT_COLS && corpse.anim.tick(dt).just_finished() {
+            corpse.frame += 1;
+        }
+        if let Some(atlas) = spr.texture_atlas.as_mut() {
+            atlas.index = corpse.row * KNIGHT_COLS + corpse.frame;
         }
     }
 }

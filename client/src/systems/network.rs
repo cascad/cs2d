@@ -10,11 +10,11 @@ use crate::events::{
 use crate::menu::ConnectTimeout;
 use crate::resources::grenades::{GrenadeStates, NetState};
 use crate::resources::{
-    CircleTex, ClientLatency, DeadPlayers, HpUiMap, LastKnownPos, LastSeen, LocalStatus, MeleeMesh,
-    MyPlayer, PendingInputsClient, PredictedPos, SnapshotBuffer, SpawnedPlayers, TimeSync, UiFont,
+    ClientLatency, DeadPlayers, HpUiMap, LastKnownPos, LastSeen, LocalStatus,
+    MyPlayer, PendingInputsClient, PredictedPos, RingTex, SnapshotBuffer, SpawnedPlayers, TimeSync,
     WallGridRes,
 };
-use crate::systems::melee::spawn_melee_swing;
+use crate::systems::iso::{ISO_ACTOR_PX, KNIGHT_ANCHOR_Y};
 use crate::systems::shoot::spawn_tracer;
 use crate::systems::utils::{spawn_hp_ui, time_in_seconds};
 use bevy::ecs::system::SystemParam;
@@ -40,15 +40,15 @@ pub struct NetCtx<'w, 's> {
 
     pub q_marker: Query<'w, 's, (Entity, &'static PlayerMarker)>,
 
-    pub font: Res<'w, UiFont>,
-    pub circle_tex: Res<'w, CircleTex>,
+    pub ring_tex: Res<'w, RingTex>,
+    pub knight: Res<'w, crate::systems::iso::KnightAnims>,
 
     // события
-    pub ev_damage: EventWriter<'w, PlayerDamagedEvent>,
-    pub ev_died: EventWriter<'w, PlayerDied>,
-    pub ev_left: EventWriter<'w, PlayerLeftEvent>,
-    pub ev_grenade_spawn: EventWriter<'w, GrenadeSpawnEvent>,
-    pub ev_grenade_detonated: EventWriter<'w, GrenadeDetonatedEvent>,
+    pub ev_damage: MessageWriter<'w, PlayerDamagedEvent>,
+    pub ev_died: MessageWriter<'w, PlayerDied>,
+    pub ev_left: MessageWriter<'w, PlayerLeftEvent>,
+    pub ev_grenade_spawn: MessageWriter<'w, GrenadeSpawnEvent>,
+    pub ev_grenade_detonated: MessageWriter<'w, GrenadeDetonatedEvent>,
 
     // прочее
     pub grenade_states: ResMut<'w, GrenadeStates>,
@@ -59,8 +59,16 @@ pub struct NetCtx<'w, 's> {
     pub next_state: ResMut<'w, NextState<AppState>>,
     pub status: ResMut<'w, LocalStatus>,
     pub predicted: ResMut<'w, PredictedPos>,
-    pub melee_mesh: Res<'w, MeleeMesh>,
-    pub materials: ResMut<'w, Assets<ColorMaterial>>,
+    /// Анимации актёров по marker — чтобы запускать удар у удалённых игроков.
+    pub q_anim: Query<'w, 's, (&'static PlayerMarker, &'static mut crate::components::ActorAnim)>,
+
+    // НЕПИСИ (скелеты)
+    pub skeleton: Option<Res<'w, crate::systems::npc::SkeletonAnims>>,
+    pub spawned_npcs: ResMut<'w, crate::systems::npc::SpawnedNpcs>,
+    pub q_npc: Query<'w, 's, (Entity, &'static crate::components::NpcMarker)>,
+
+    /// Общий реестр трупов (скелеты + игроки) с лимитом MAX_CORPSES.
+    pub corpses: ResMut<'w, crate::resources::Corpses>,
 }
 
 pub fn receive_server_messages(mut client: ResMut<QuinnetClient>, mut net: NetCtx) {
@@ -69,10 +77,7 @@ pub fn receive_server_messages(mut client: ResMut<QuinnetClient>, mut net: NetCt
         return;
     };
 
-    while let Some((chan, msg)) = conn.try_receive_message::<S2C>() {
-        if chan != CH_S2C {
-            continue;
-        }
+    while let Some(msg) = conn.try_receive_message_on::<S2C, _>(CH_S2C) {
         match msg {
             // ===================================================
             // 1) СНАПШОТ
@@ -91,9 +96,10 @@ pub fn receive_server_messages(mut client: ResMut<QuinnetClient>, mut net: NetCt
                 // подтянет smooth_local_player.
                 if let Some(ack) = snap.last_input_seq.get(&net.my.id) {
                     if let Some(ps) = snap.players.iter().find(|p| p.id == net.my.id) {
-                        // стамина/блок локального игрока — авторитет сервера (для UI)
+                        // стамина/блок/HP локального игрока — авторитет сервера (для UI)
                         net.status.stamina = ps.stamina;
                         net.status.blocking = ps.blocking;
+                        net.status.hp = ps.hp;
 
                         while let Some(front) = net.pending.0.front() {
                             if front.seq <= *ack {
@@ -107,12 +113,16 @@ pub fn receive_server_messages(mut client: ResMut<QuinnetClient>, mut net: NetCt
                         let cfg = AbilityConfig::default();
                         let mut ab = Abilities {
                             stamina: ps.stamina,
+                            facing: ps.rotation,
                             ..Default::default()
                         };
                         let mut pos = Vec2::new(ps.x, ps.y);
                         for inp in net.pending.0.iter() {
                             pos = step_pos(pos, inp, &mut ab, &cfg, &net.wall_grid.0);
                         }
+                        // Авторитетная позиция после переигрывания вводов. Отрисовка
+                        // (smooth_local_player) мягко стянется к ней по dead-reckoning,
+                        // не теряя ровной скорости — коррекция незаметна.
                         net.predicted.pos = pos;
                         net.predicted.valid = true;
                     }
@@ -139,18 +149,34 @@ pub fn receive_server_messages(mut client: ResMut<QuinnetClient>, mut net: NetCt
                             p.y,
                             p.rotation,
                             label,
-                            net.circle_tex.0.clone(),
+                            net.knight.idle.clone(),
+                            net.knight.layout.clone(),
+                            net.ring_tex.0.clone(),
                         );
                     }
 
                     if !net.hp_ui_map.0.contains_key(&p.id) {
-                        let entity =
-                            spawn_hp_ui(&mut net.commands, p.id, p.hp as u32, net.font.0.clone());
+                        let entity = spawn_hp_ui(&mut net.commands, p.id, p.hp);
                         net.hp_ui_map.0.insert(p.id, entity);
                     }
 
                     if let Some(last_pos) = net.last_pos.as_deref_mut() {
                         last_pos.0.insert(p.id, (Vec2::new(p.x, p.y), p.rotation));
+                    }
+                }
+
+                // Поза блока УДАЛЁННЫХ игроков — из авторитетного снапшота
+                // (`blocking`), иначе её видел только сам блокирующий. Локального
+                // не трогаем: ему блок ставит предсказание (send_input).
+                for p in &snap.players {
+                    if p.id == net.my.id || net.dead.0.contains(&p.id) {
+                        continue;
+                    }
+                    for (marker, mut anim) in net.q_anim.iter_mut() {
+                        if marker.0 == p.id {
+                            anim.blocking = p.blocking;
+                            break;
+                        }
                     }
                 }
 
@@ -209,7 +235,9 @@ pub fn receive_server_messages(mut client: ResMut<QuinnetClient>, mut net: NetCt
                     y,
                     rotation,
                     label,
-                    net.circle_tex.0.clone(),
+                    net.knight.idle.clone(),
+                    net.knight.layout.clone(),
+                    net.ring_tex.0.clone(),
                 );
                 net.spawned.0.insert(id);
 
@@ -217,6 +245,7 @@ pub fn receive_server_messages(mut client: ResMut<QuinnetClient>, mut net: NetCt
                 // чтобы рендер не «уезжал» сглаживанием от старой позиции
                 if id == net.my.id {
                     net.predicted.pos = Vec2::new(x, y);
+                    net.predicted.vel = Vec2::ZERO;
                     net.predicted.valid = true;
                     net.pending.0.clear();
                 }
@@ -274,6 +303,12 @@ pub fn receive_server_messages(mut client: ResMut<QuinnetClient>, mut net: NetCt
             // 6) ДАМАГ
             // ===================================================
             S2C::PlayerDamaged { id, new_hp, damage } => {
+                // HUD локального игрока обновляем СРАЗУ из события урона: смертельный
+                // удар убирает игрока из снапшотов (его hp<=0 не приходит в снапшоте),
+                // поэтому без этого полоска HUD не успевала показать обнуление.
+                if id == net.my.id {
+                    net.status.hp = new_hp;
+                }
                 net.ev_damage
                     .write(PlayerDamagedEvent { id, new_hp, damage });
             }
@@ -306,16 +341,30 @@ pub fn receive_server_messages(mut client: ResMut<QuinnetClient>, mut net: NetCt
             // ===================================================
             // 7.5) MELEE-ВЗМАХ (визуал)
             // ===================================================
-            S2C::MeleeFx { attacker_id, from, dir } => {
-                // локальному игроку взмах уже нарисован мгновенно при клике
+            S2C::MeleeFx { attacker_id, from: _, dir: _ } => {
+                // локальному игроку анимация удара уже запущена при клике;
+                // удалённому — запускаем одноразовую анимацию удара рыцаря.
                 if attacker_id != net.my.id {
-                    spawn_melee_swing(
-                        &mut net.commands,
-                        net.melee_mesh.0.clone(),
-                        &mut net.materials,
-                        from,
-                        dir,
-                    );
+                    for (marker, mut anim) in net.q_anim.iter_mut() {
+                        if marker.0 == attacker_id {
+                            anim.start_action(crate::components::AnimState::Attack);
+                        }
+                    }
+                }
+            }
+
+            S2C::DashFx { player_id, dir } => {
+                // Источник правды о рывке — сервер: ролл играем для ЛЮБОГО игрока
+                // (вкл. локального) ровно на реальный рывок, спрайт катится в `dir`.
+                let ang = if dir.length_squared() > 1e-6 {
+                    dir.y.atan2(dir.x)
+                } else {
+                    0.0
+                };
+                for (marker, mut anim) in net.q_anim.iter_mut() {
+                    if marker.0 == player_id {
+                        anim.start_action_facing(crate::components::AnimState::Dash, ang);
+                    }
                 }
             }
 
@@ -327,21 +376,32 @@ pub fn receive_server_messages(mut client: ResMut<QuinnetClient>, mut net: NetCt
 
                 if let Some(last_pos) = net.last_pos.as_ref() {
                     if let Some((pos, rot)) = last_pos.0.get(&victim).cloned() {
-                        net.commands.spawn((
+                        use crate::systems::iso::{knight_row, KNIGHT_COLS};
+                        let row = knight_row(rot);
+                        // Труп — анимация смерти рыцаря (Death.png), проигрывается
+                        // один раз и замирает на последнем кадре; ряд = направление.
+                        let corpse_ent = net.commands.spawn((
                             Sprite {
-                                color: Color::srgba(0.6, 0.15, 0.15, 1.0),
-                                custom_size: Some(Vec2::splat(PLAYER_SIZE)),
+                                image: net.knight.death.clone(),
+                                texture_atlas: Some(TextureAtlas {
+                                    layout: net.knight.layout.clone(),
+                                    index: row * KNIGHT_COLS,
+                                }),
+                                custom_size: Some(Vec2::splat(ISO_ACTOR_PX)),
                                 ..default()
                             },
-                            Transform::from_translation(world_to_translation(pos, layers::CORPSE))
-                                .with_rotation(Quat::from_rotation_z(rot)),
+                            bevy::sprite::Anchor(Vec2::new(0.0, KNIGHT_ANCHOR_Y)),
+                            Transform::from_translation(world_to_translation(pos, layers::CORPSE)),
                             GlobalTransform::default(),
                             WorldPos(pos),
                             RenderLayer(layers::CORPSE),
                             Corpse {
-                                timer: Timer::from_seconds(8.0, TimerMode::Once),
+                                row,
+                                frame: 0,
+                                anim: Timer::from_seconds(1.0 / 24.0, TimerMode::Repeating),
                             },
-                        ));
+                        )).id();
+                        net.corpses.register(&mut net.commands, corpse_ent);
                     }
                 }
 
@@ -360,6 +420,25 @@ pub fn receive_server_messages(mut client: ResMut<QuinnetClient>, mut net: NetCt
 
                 net.ev_died.write(PlayerDied { victim, killer });
                 info!("💀 Игрок {} погиб ({:?})", victim, killer);
+            }
+
+            // ===================================================
+            // 9) СМЕРТЬ НЕПИСЯ (скелета) → труп
+            // ===================================================
+            S2C::NpcDied { id, x, y, facing } => {
+                if let Some((ent, _)) = net.q_npc.iter().find(|(_, m)| m.0 == id) {
+                    net.commands.entity(ent).despawn();
+                }
+                net.spawned_npcs.0.remove(&id);
+                if let Some(anims) = net.skeleton.as_deref() {
+                    let corpse_ent = crate::systems::npc::spawn_skeleton_corpse(
+                        &mut net.commands,
+                        anims,
+                        Vec2::new(x, y),
+                        facing,
+                    );
+                    net.corpses.register(&mut net.commands, corpse_ent);
+                }
             }
         }
     }
@@ -392,7 +471,7 @@ fn step_pos(
         ab,
         &AbilityInput {
             move_dir: dir,
-            facing: inp.rotation,
+            aim: inp.rotation,
             want_dash: inp.dash,
             want_block: inp.block,
         },
@@ -401,6 +480,29 @@ fn step_pos(
     );
     let delta = out.move_dir * out.speed * TICK_DT;
     walls.slide_circle(pos, delta, PLAYER_SIZE * 0.5)
+}
+
+/// Локальная (в системе координат спрайта игрока = экранной) позиция засечки на
+/// ободке-эллипсе для мирового угла `facing`. Точка наземного круга радиуса `RW`
+/// под углом `facing` проецируется в изо — так засечка ложится ровно на обод.
+fn notch_local(facing: f32) -> Vec3 {
+    use crate::render::world_to_screen;
+    // полуось эллипса по X = ISO_ACTOR_PX*0.21 (= RW*√2) ⇒ RW = .../√2
+    let rw = ISO_ACTOR_PX * 0.21 / std::f32::consts::SQRT_2;
+    let s = world_to_screen(Vec2::new(facing.cos(), facing.sin())) * rw;
+    Vec3::new(s.x, s.y, -0.45) // чуть выше кольца (-0.5), но под телом
+}
+
+/// Каждый кадр двигает засечку по ободку в направлении взгляда игрока (`Facing`).
+pub fn update_dir_notch(
+    q_face: Query<&crate::components::Facing>,
+    mut q_notch: Query<(&ChildOf, &mut Transform), With<crate::components::DirNotch>>,
+) {
+    for (parent, mut tf) in q_notch.iter_mut() {
+        if let Ok(facing) = q_face.get(parent.parent()) {
+            tf.translation = notch_local(facing.0);
+        }
+    }
 }
 
 // Утилита для единообразного создания сущности игрока.
@@ -414,32 +516,41 @@ fn spawn_player(
     y: f32,
     rot: f32,
     from: String,
-    circle: Handle<Image>,
+    sheet: Handle<Image>,
+    layout: Handle<TextureAtlasLayout>,
+    ring: Handle<Image>,
 ) -> Entity {
+    use crate::systems::iso::{knight_row, KNIGHT_COLS};
     let world = Vec2::new(x, y);
-    let tf = Transform::from_translation(world_to_translation(world, layers::ACTOR))
-        .with_rotation(Quat::from_rotation_z(rot));
+    // Направленный спрайт НЕ вращаем — направление кодируется выбором кадра/ряда.
+    let tf = Transform::from_translation(world_to_translation(world, layers::ACTOR));
     let is_local = id == me.id;
 
-    let body_color = if is_local {
-        Color::srgba(0.0, 1.0, 0.0, 1.0) // зелёный
-    } else {
-        Color::srgba(0.0, 0.0, 1.0, 1.0) // синий
-    };
-
+    // HD-рыцарь и так светлый — не тонируем тело (свой/чужой различает кольцо).
     let entity = commands
         .spawn((
             Sprite {
-                image: circle,
-                color: body_color,
-                custom_size: Some(Vec2::splat(PLAYER_SIZE)),
+                image: sheet,
+                texture_atlas: Some(TextureAtlas {
+                    layout,
+                    index: knight_row(rot) * KNIGHT_COLS,
+                }),
+                custom_size: Some(Vec2::splat(ISO_ACTOR_PX)),
                 ..default()
             },
+            // Якорим «ноги» рыцаря к WorldPos, чтобы кольцо-маркер было ровно под
+            // ногами. В Bevy 0.18 Anchor — отдельный компонент рядом со Sprite.
+            bevy::sprite::Anchor(Vec2::new(0.0, KNIGHT_ANCHOR_Y)),
             tf,
             GlobalTransform::default(),
             WorldPos(world),
             RenderLayer(layers::ACTOR),
             PlayerMarker(id),
+            crate::components::Facing(rot),
+            crate::components::ActorAnim {
+                prev: world,
+                ..default()
+            },
             Name::new(format!(
                 "Player[{}] {}",
                 if is_local { "LOCAL" } else { "REMOTE" },
@@ -447,14 +558,32 @@ fn spawn_player(
             )),
         ))
         .with_children(|p| {
-            // ствол: тёмный прямоугольник от центра вперёд (+X)
+            // Диабло-кольцо под ногами (полый ободок, изо-эллипс): всегда находимый
+            // маркер, заодно различает свой/чужой. Центр = WorldPos (ноги).
+            let ring_color = if is_local {
+                Color::srgba(0.3, 1.0, 0.5, 0.95)
+            } else {
+                Color::srgba(1.0, 0.35, 0.35, 0.9)
+            };
             p.spawn((
                 Sprite {
-                    color: Color::srgba(0.1, 0.1, 0.12, 1.0),
-                    custom_size: Some(Vec2::new(PLAYER_SIZE * 0.75, PLAYER_SIZE * 0.16)),
+                    image: ring,
+                    color: ring_color,
+                    // изо-эллипс (2:1 сплющен) под ногами
+                    custom_size: Some(Vec2::new(ISO_ACTOR_PX * 0.42, ISO_ACTOR_PX * 0.21)),
                     ..default()
                 },
-                Transform::from_xyz(PLAYER_SIZE * 0.45, 0.0, 1.0),
+                Transform::from_xyz(0.0, 0.0, -0.5),
+            ));
+            // Засечка направления на ободке (куда смотрит/целится модель).
+            p.spawn((
+                Sprite {
+                    color: Color::srgb(1.0, 1.0, 1.0),
+                    custom_size: Some(Vec2::splat(ISO_ACTOR_PX * 0.10)),
+                    ..default()
+                },
+                Transform::from_translation(notch_local(rot)),
+                crate::components::DirNotch,
             ));
         })
         .id();

@@ -8,14 +8,14 @@ name = "client"
 path = "src/main.rs"
 
 [dependencies]
-bevy = { version = "0.16.1" , features = [
+bevy = { version = "0.18" , features = [
     "bevy_asset",
     "bevy_sprite", 
     "bevy_render",
     "png", "x11",
     ]}
 
-bevy_quinnet = "0.17.0"
+bevy_quinnet = { version = "0.20.0", features = ["bincode-messages"] }
 
 # protocol нужна ТОЛЬКО фича "quinnet"
 protocol = { path = "../protocol", features = ["quinnet"] }

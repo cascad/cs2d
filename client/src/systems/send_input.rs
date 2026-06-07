@@ -1,8 +1,8 @@
-use crate::components::LocalPlayer;
+use crate::components::{ActorAnim, Facing, LocalPlayer};
 use crate::render::WorldPos;
 use crate::resources::{
-    CurrentStance, LocalAbilities, PendingInputsClient, PredictedPos, SendTimer, SeqCounter,
-    WallGridRes,
+    AimAngle, CurrentStance, LocalAbilities, PendingInputsClient, PredictedPos, SendTimer,
+    SeqCounter, WallGridRes,
 };
 use crate::systems::utils::time_in_seconds;
 use bevy::prelude::*;
@@ -28,7 +28,8 @@ pub fn send_input_and_predict(
     walls: Res<WallGridRes>,
     mut abilities: ResMut<LocalAbilities>,
     mut predicted: ResMut<PredictedPos>,
-    player_q: Query<&Transform, With<LocalPlayer>>,
+    aim: Res<AimAngle>,
+    mut player_q: Query<(&mut Facing, &mut ActorAnim), With<LocalPlayer>>,
     // накапливаем нажатие рывка между тиками, чтобы не потерять его,
     // если Space нажали не в кадр отправки
     mut dash_latch: Local<bool>,
@@ -44,14 +45,29 @@ pub fn send_input_and_predict(
         return; // ждём первую авторитетную позицию из снапшота
     }
 
-    let Ok(tf) = player_q.single() else { return };
-    let facing = tf.rotation.to_euler(EulerRot::XYZ).2;
+    let Ok((mut player_facing, mut anim)) = player_q.single_mut() else { return };
+    // желаемый угол на курсор; фактический (довёрнутый) вернёт tick_abilities
+    let aim_angle = aim.0;
+
+    // Изо-ремап управления: WASD трактуем как ЭКРАННЫЕ направления и переводим в
+    // мир. При изо 2:1 экран-вверх = world(1,1), вниз = (-1,-1), влево = (-1,1),
+    // вправо = (1,-1). Затем сводим к знакам по осям мира — сервер из этих же
+    // булевых посчитает ту же нормированную скорость (рассинхрона нет).
+    let mut v = Vec2::ZERO;
+    if keys.pressed(KeyCode::KeyW) { v += Vec2::new(1.0, 1.0); }
+    if keys.pressed(KeyCode::KeyS) { v += Vec2::new(-1.0, -1.0); }
+    if keys.pressed(KeyCode::KeyA) { v += Vec2::new(-1.0, 1.0); }
+    if keys.pressed(KeyCode::KeyD) { v += Vec2::new(1.0, -1.0); }
+    let in_up = v.y > 0.0;
+    let in_down = v.y < 0.0;
+    let in_left = v.x < 0.0;
+    let in_right = v.x > 0.0;
 
     let mut dir = Vec2::ZERO;
-    if keys.pressed(KeyCode::KeyW) { dir.y += 1.; }
-    if keys.pressed(KeyCode::KeyS) { dir.y -= 1.; }
-    if keys.pressed(KeyCode::KeyA) { dir.x -= 1.; }
-    if keys.pressed(KeyCode::KeyD) { dir.x += 1.; }
+    if in_up { dir.y += 1.; }
+    if in_down { dir.y -= 1.; }
+    if in_left { dir.x -= 1.; }
+    if in_right { dir.x += 1.; }
     dir = dir.normalize_or_zero();
 
     // блок — удержание mouse2
@@ -62,7 +78,7 @@ pub fn send_input_and_predict(
         &mut abilities.0,
         &AbilityInput {
             move_dir: dir,
-            facing,
+            aim: aim_angle,
             want_dash: *dash_latch,
             want_block,
         },
@@ -70,17 +86,33 @@ pub fn send_input_and_predict(
         &cfg,
     );
 
+    // фактический (плавно довёрнутый) угол модели — его и рисуем/шлём
+    let facing = out.facing;
+    player_facing.0 = facing;
+
+    // Анимацию переката НЕ заводим из предсказания — её надёжно включает событие
+    // `S2C::DashFx` от сервера (иначе при расхождении стамины/кулдауна ролл
+    // иногда не проигрывался). Блок — держится, пока установлен (mouse2).
+    anim.blocking = out.blocking;
+
+    // Мировая скорость этого тика — её отрисовка интегрирует КАЖДЫЙ КАДР
+    // (экстраполяция), поэтому движение по экрану ровное и не зависит от каденса
+    // «кадры vs тики». При коллизии slide_circle мог урезать шаг — берём ФАКТИЧЕСКИ
+    // применённую скорость, чтобы у стены отрисовка не «пёрла» сквозь неё.
     let delta = out.move_dir * out.speed * TICK_DT;
-    predicted.pos = walls.0.slide_circle(predicted.pos, delta, PLAYER_SIZE * 0.5);
+    let new_pos = walls.0.slide_circle(predicted.pos, delta, PLAYER_SIZE * 0.5);
+    predicted.vel = (new_pos - predicted.pos) / TICK_DT;
+    predicted.pos = new_pos;
 
     seq.0 = seq.0.wrapping_add(1);
     let inp = InputState {
         seq: seq.0,
-        up: keys.pressed(KeyCode::KeyW),
-        down: keys.pressed(KeyCode::KeyS),
-        left: keys.pressed(KeyCode::KeyA),
-        right: keys.pressed(KeyCode::KeyD),
-        rotation: facing,
+        up: in_up,
+        down: in_down,
+        left: in_left,
+        right: in_right,
+        // шлём ЖЕЛАЕМЫЙ угол (курсор) — сервер довернёт модель тем же кодом
+        rotation: aim_angle,
         stance: stance.0.clone(),
         timestamp: time_in_seconds(),
         block: want_block,
@@ -97,10 +129,13 @@ pub fn send_input_and_predict(
     *dash_latch = false;
 }
 
-/// Плавно подтягивает ОТРИСОВКУ локального игрока к точной предсказанной позиции.
-/// Симуляция шагает раз в тик (64 Гц), а кадров обычно больше — без сглаживания
-/// это выглядело бы ступенчато. Чисто визуально: на симуляцию/сеть/других
-/// клиентов не влияет. Большой скачок (телепорт/респавн) применяем мгновенно.
+/// Плавно ведёт ОТРИСОВКУ локального игрока методом dead-reckoning: каждый кадр
+/// продвигаем позицию по последней известной СКОРОСТИ (экстраполяция) и мягко
+/// стягиваем к авторитетной `predicted.pos`. Используем ТОЛЬКО часы движка
+/// (`time.delta`), без рассинхрона «настенные часы vs тик» — поэтому на прямой
+/// скорость постоянная и рывки незаметны глазу даже при будущем пинге, а
+/// коррекция реконсиляции «размазывается» и не дёргает. Большой скачок
+/// (телепорт/респавн) применяем мгновенно.
 pub fn smooth_local_player(
     time: Res<Time>,
     predicted: Res<PredictedPos>,
@@ -110,16 +145,20 @@ pub fn smooth_local_player(
         return;
     }
     let Ok(mut wp) = q.single_mut() else { return };
+    let dt = time.delta_secs();
     let cur = wp.0;
-    let target = predicted.pos;
 
-    let new = if (target - cur).length() > 256.0 {
-        target // далеко (респавн/коррекция) — без скольжения
-    } else {
-        // экспоненциальное приближение, не зависящее от FPS
-        let k = 30.0;
-        let a = 1.0 - (-k * time.delta_secs()).exp();
-        cur.lerp(target, a)
-    };
-    wp.0 = new;
+    // далёкий скачок — это телепорт/респавн: ставим мгновенно
+    if (predicted.pos - cur).length() > 256.0 {
+        wp.0 = predicted.pos;
+        return;
+    }
+
+    // 1) экстраполяция по скорости (ровно, каждый кадр)
+    let extrap = cur + predicted.vel * dt;
+    // 2) мягкая коррекция к авторитетной позиции (гасит дрейф/реконсиляцию).
+    //    k небольшой → коррекция плавная и незаметная; скорость остаётся ровной.
+    let k = 12.0;
+    let a = 1.0 - (-k * dt).exp();
+    wp.0 = extrap.lerp(predicted.pos, a);
 }

@@ -2,3 +2,6 @@ pub mod grenade_ui;
 pub mod update_grenade_cooldown_ui;
 pub mod components;
 pub mod stamina_ui;
+pub mod cooldowns_ui;
+pub mod hp_hud;
+pub mod minimap;

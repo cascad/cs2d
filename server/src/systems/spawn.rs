@@ -33,7 +33,7 @@ fn pick_spawn_point(spawns: &Res<SpawnPoints>, index_hint: u64) -> Vec2 {
 }
 
 pub fn process_client_connected(
-    mut ev: EventReader<ClientConnected>,
+    mut ev: MessageReader<ClientConnected>,
     mut connected: ResMut<ConnectedClients>,
     mut spawned: ResMut<SpawnedClients>,
     mut states: ResMut<PlayerStates>,
@@ -57,22 +57,21 @@ pub fn process_client_connected(
         );
         spawned.0.insert(*id);
 
-        server
-            .endpoint_mut()
-            .broadcast_message_on(
-                CH_S2C,
-                S2C::PlayerConnected {
-                    id: *id,
-                    x: pos.x,
-                    y: pos.y,
-                },
-            )
-            .unwrap();
+        if let Err(e) = server.endpoint_mut().broadcast_message_on(
+            CH_S2C,
+            S2C::PlayerConnected {
+                id: *id,
+                x: pos.x,
+                y: pos.y,
+            },
+        ) {
+            warn!("broadcast PlayerConnected failed: {e:?}");
+        }
     }
 }
 
 pub fn process_client_disconnected(
-    mut ev: EventReader<ClientDisconnected>,
+    mut ev: MessageReader<ClientDisconnected>,
     mut connected: ResMut<ConnectedClients>,
     mut spawned: ResMut<SpawnedClients>,
     mut states: ResMut<PlayerStates>,
@@ -83,15 +82,17 @@ pub fn process_client_disconnected(
         spawned.0.remove(id);
         states.0.remove(id);
 
-        server
+        if let Err(e) = server
             .endpoint_mut()
             .broadcast_message_on(CH_S2C, S2C::PlayerDisconnected { id: *id })
-            .unwrap();
+        {
+            warn!("broadcast PlayerDisconnected failed: {e:?}");
+        }
     }
 }
 
 pub fn process_player_respawn(
-    mut ev: EventReader<PlayerRespawn>,
+    mut ev: MessageReader<PlayerRespawn>,
     mut spawned: ResMut<SpawnedClients>,
     mut states: ResMut<PlayerStates>,
     mut server: ResMut<QuinnetServer>,
@@ -102,16 +103,15 @@ pub fn process_player_respawn(
         st.pos = Vec2::new(*x, *y);
         st.hp = 100;
 
-        server
-            .endpoint_mut()
-            .broadcast_message_on(
-                CH_S2C,
-                S2C::PlayerRespawn {
-                    id: *id,
-                    x: *x,
-                    y: *y,
-                },
-            )
-            .unwrap();
+        if let Err(e) = server.endpoint_mut().broadcast_message_on(
+            CH_S2C,
+            S2C::PlayerRespawn {
+                id: *id,
+                x: *x,
+                y: *y,
+            },
+        ) {
+            warn!("broadcast PlayerRespawn failed: {e:?}");
+        }
     }
 }

@@ -23,7 +23,7 @@ pub fn grenade_throw(
 ) {
     grenade_cd.0.tick(time.delta());
 
-    if !keys.just_pressed(KeyCode::KeyG) || !grenade_cd.0.finished() {
+    if !keys.just_pressed(KeyCode::KeyG) || !grenade_cd.0.is_finished() {
         return;
     }
 

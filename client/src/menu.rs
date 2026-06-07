@@ -2,7 +2,8 @@ use bevy::prelude::*;
 use bevy::ui::{AlignItems, BackgroundColor, FlexDirection, JustifyContent, Node, UiRect, Val};
 use bevy_quinnet::client::QuinnetClient;
 use bevy_quinnet::client::certificate::CertificateVerificationMode;
-use bevy_quinnet::client::connection::ClientEndpointConfiguration;
+use bevy_quinnet::client::connection::ClientAddrConfiguration;
+use bevy_quinnet::client::{ClientConnectionConfiguration, ClientConnectionConfigurationDefaultables};
 use protocol::quinnet_adapter::build_channels_config;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
@@ -348,11 +349,16 @@ fn do_connect(
         .map_err(|_| format!("неверный адрес: {addr_str}"))?;
 
     let local_bind_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0);
-    let endpoint_config = ClientEndpointConfiguration::from_addrs(server_addr, local_bind_addr);
-    let cert_mode = CertificateVerificationMode::SkipVerification;
-    let channels_config = build_channels_config();
+    let connection_config = ClientConnectionConfiguration {
+        addr_config: ClientAddrConfiguration::from_addrs(server_addr, local_bind_addr),
+        cert_mode: CertificateVerificationMode::SkipVerification,
+        defaultables: ClientConnectionConfigurationDefaultables {
+            send_channels_cfg: build_channels_config(),
+            ..Default::default()
+        },
+    };
 
-    match client.open_connection(endpoint_config, cert_mode, channels_config) {
+    match client.open_connection(connection_config) {
         Ok(conn_id) => {
             commands.insert_resource(CurrentConnId(Some(conn_id)));
             info!("🔌 Подключаемся к {}", addr_str);
@@ -375,7 +381,7 @@ pub fn connection_timeout_system(
         return;
     };
     t.0.tick(time.delta());
-    if t.0.finished() {
+    if t.0.is_finished() {
         // закрываем текущее соединение (если знаем id), иначе на всякий
         if let Some(id) = conn_id.and_then(|c| c.0) {
             let _ = client.close_connection(id);

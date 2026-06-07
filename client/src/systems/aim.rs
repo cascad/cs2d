@@ -63,19 +63,20 @@ pub fn update_aim_to_mouse(
 
     let aim_pos = player_pos + dir;
 
-    // Обновляем маркер и линию (позиции через границу мир→экран)
+    // Обновляем маркер и линию. Всё считаем в ЭКРАННЫХ координатах: луч прямой в
+    // мире остаётся прямым на экране, но его угол/длина — уже после изо-проекции.
+    let s_player = world_to_screen(player_pos);
+    let s_aim = world_to_screen(aim_pos);
+    let s_dir = s_aim - s_player;
     for (mut tf, aim_marker, aim_line) in sets.p1().iter_mut() {
         if aim_marker.is_some() {
             // Красная точка
-            let s = world_to_screen(aim_pos);
-            tf.translation = Vec3::new(s.x, s.y, layers::AIM);
+            tf.translation = Vec3::new(s_aim.x, s_aim.y, layers::AIM);
         } else if aim_line.is_some() {
-            // Линия (под изометрию повороты/масштаб ещё придётся пересчитать)
-            let len = dir.length();
-            let s = world_to_screen(player_pos + dir * 0.5);
-            tf.translation = Vec3::new(s.x, s.y, layers::AIM - 1.0);
-            tf.rotation = Quat::from_rotation_z(dir.y.atan2(dir.x));
-            tf.scale = Vec3::new(len, 1.0, 1.0); // растягиваем по X
+            let mid = s_player + s_dir * 0.5;
+            tf.translation = Vec3::new(mid.x, mid.y, layers::AIM - 1.0);
+            tf.rotation = Quat::from_rotation_z(s_dir.y.atan2(s_dir.x));
+            tf.scale = Vec3::new(s_dir.length(), 1.0, 1.0); // растягиваем по X
         }
     }
 }

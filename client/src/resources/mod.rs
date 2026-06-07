@@ -12,6 +12,26 @@ pub struct MyPlayer {
     pub got: bool,
 }
 
+/// Общий реестр трупов (скелеты + игроки) в порядке появления. Трупы лежат, пока
+/// их не больше [`protocol::constants::MAX_CORPSES`]; при превышении удаляется
+/// самый старый. Счётчик единый для всех типов трупов.
+#[derive(Resource, Default)]
+pub struct Corpses(pub VecDeque<Entity>);
+
+impl Corpses {
+    /// Регистрирует новый труп; если их стало больше лимита — деспавнит старейший.
+    pub fn register(&mut self, commands: &mut Commands, e: Entity) {
+        self.0.push_back(e);
+        while self.0.len() > protocol::constants::MAX_CORPSES {
+            if let Some(old) = self.0.pop_front() {
+                if let Ok(mut ec) = commands.get_entity(old) {
+                    ec.despawn();
+                }
+            }
+        }
+    }
+}
+
 #[derive(Resource)]
 pub struct TimeSync {
     pub offset: f64,
@@ -25,6 +45,11 @@ pub struct SnapshotBuffer {
 
 #[derive(Resource)]
 pub struct CurrentStance(pub Stance);
+
+/// Желаемый угол взгляда (на курсор), мировой радиан. Пишется `rotate_to_cursor`,
+/// читается предсказанием — модель плавно к нему доворачивается (см. `tick_abilities`).
+#[derive(Resource, Default)]
+pub struct AimAngle(pub f32);
 
 #[derive(Resource)]
 pub struct SendTimer(pub Timer);
@@ -82,10 +107,9 @@ pub struct UiFont(pub Handle<Font>);
 #[derive(Resource, Clone)]
 pub struct CircleTex(pub Handle<Image>);
 
-/// Меш-сектор взмаха melee (радиус + угол), в локальных координатах вершиной в
-/// центре игрока и раскрытием по +X. Строится один раз.
+/// Сгенерированный полый ободок (кольцо) — маркер под ногами игрока.
 #[derive(Resource, Clone)]
-pub struct MeleeMesh(pub Handle<Mesh>);
+pub struct RingTex(pub Handle<Image>);
 
 #[derive(Resource, Default)]
 pub struct HpUiMap(pub HashMap<u64, Entity>);
@@ -119,11 +143,22 @@ pub struct LastSeen(pub HashMap<u64, f64>);
 #[derive(Resource, Default)]
 pub struct LocalAbilities(pub protocol::abilities::Abilities);
 
-/// Стамина/блок локального игрока из последнего снапшота (для UI).
-#[derive(Resource, Default)]
+/// Стамина/блок/HP локального игрока из последнего снапшота (для UI).
+#[derive(Resource)]
 pub struct LocalStatus {
     pub stamina: f32,
     pub blocking: bool,
+    pub hp: i32,
+}
+
+impl Default for LocalStatus {
+    fn default() -> Self {
+        Self {
+            stamina: protocol::constants::STAMINA_MAX,
+            blocking: false,
+            hp: protocol::constants::PLAYER_MAX_HP,
+        }
+    }
 }
 
 /// Точная предсказанная позиция локального игрока (симуляция). Двигается в
@@ -132,7 +167,12 @@ pub struct LocalStatus {
 /// других клиентов не влияет (они видят нас из серверных снапшотов).
 #[derive(Resource, Default)]
 pub struct PredictedPos {
+    /// Авторитетная (предсказанная) позиция, шагает раз в тик + правится реконсиляцией.
     pub pos: Vec2,
+    /// Мировая скорость, применённая на последнем тике (move_dir·speed). Отрисовка
+    /// интегрирует её КАЖДЫЙ КАДР (экстраполяция) → постоянная, незаметная глазу
+    /// скорость, не зависящая ни от FPS, ни от рассинхрона часов «тик vs кадр».
+    pub vel: Vec2,
     pub valid: bool,
 }
 
