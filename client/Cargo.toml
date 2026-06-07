@@ -20,4 +20,5 @@ bevy_quinnet = { version = "0.20.0", features = ["bincode-messages"] }
 # protocol нужна ТОЛЬКО фича "quinnet"
 protocol = { path = "../protocol", features = ["quinnet"] }
 
-serde = "1"
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"

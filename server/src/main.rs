@@ -1,4 +1,5 @@
 // todo solute this!
+mod config;
 mod constants;
 mod events;
 mod net;
@@ -44,6 +45,8 @@ fn main() {
     .expect("Error setting Ctrl‑C handler");
 
     App::new()
+        // конфиг (ip/port) из файла рядом с бинарём — создаётся при первом запуске
+        .insert_resource(config::load_or_create())
         .insert_resource(ServerTickTimer(Timer::from_seconds(
             TICK_DT,
             TimerMode::Repeating,

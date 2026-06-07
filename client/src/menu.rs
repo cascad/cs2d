@@ -56,9 +56,15 @@ impl Plugin for MenuPlugin {
 
 // ===== UI =====
 
-fn menu_setup(mut commands: Commands, mut addr: ResMut<ServerAddr>, assets: Res<AssetServer>) {
+fn menu_setup(
+    mut commands: Commands,
+    mut addr: ResMut<ServerAddr>,
+    cfg: Res<crate::config::ClientConfig>,
+    assets: Res<AssetServer>,
+) {
     if addr.0.is_empty() {
-        addr.0 = "127.0.0.1:6000".to_string();
+        // адрес по умолчанию берём из конфига рядом с бинарём (client_config.toml)
+        addr.0 = cfg.address();
     }
 
     // Камера для меню

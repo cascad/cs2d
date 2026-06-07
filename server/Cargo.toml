@@ -12,7 +12,8 @@ bevy = { version = "0.18", default-features = false, features = ["bevy_asset", "
 bevy_window = "0.18"
 bevy_quinnet = { version = "0.20.0", features = ["bincode-messages"] }
 protocol = { path = "../protocol", features = ["quinnet"] }
-serde = "1"
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
 
 [dev-dependencies]
 bevy = { version = "0.18", default-features = false }

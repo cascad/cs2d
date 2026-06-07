@@ -1,4 +1,5 @@
 mod components;
+mod config;
 mod console;
 mod constants;
 mod events;
@@ -88,6 +89,8 @@ fn asset_root() -> String {
 fn main() {
     App::new()
         // ресурсы
+        // конфиг клиента (ip/port сервера) из файла рядом с бинарём
+        .insert_resource(crate::config::load_or_create())
         .insert_resource(MyPlayer { id: 0, got: false })
         .insert_resource(TimeSync { offset: 0.0 })
         .insert_resource(SnapshotBuffer {
