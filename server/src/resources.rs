@@ -20,6 +20,10 @@ pub struct PlayerState {
     pub hp: i32,
     pub abilities: protocol::abilities::Abilities,
     pub blocking: bool,
+    /// Последний полученный ввод. Если на тик сервера не пришёл свежий пакет
+    /// (сеть/джиттер дают «пустые» тики), переиспользуем его — иначе блок/ходьба
+    /// «дёргались» бы, а блок сбрасывался и удары проходили.
+    pub last_input: Option<protocol::messages::InputState>,
 }
 
 #[derive(Resource, Default)]
@@ -139,6 +143,7 @@ pub struct Npc {
     pub pos: Vec2,
     pub facing: f32,
     pub hp: i32,
+    pub kind: protocol::messages::NpcKind,
     pub mode: NpcMode,
     pub route: usize,
     pub wp: usize,
@@ -146,6 +151,8 @@ pub struct Npc {
     pub target_pos: Vec2,
     pub lost_timer: f32,
     pub attack_cd: f32,
+    /// Сколько ещё секунд проигрывается анимация атаки (для снапшота клиенту).
+    pub attack_anim: f32,
     pub home: Vec2,
 }
 

@@ -2,7 +2,7 @@ use bevy::prelude::*;
 use bevy_quinnet::server::QuinnetServer;
 use protocol::{
     combat::block_absorbs,
-    constants::{BLOCK_ARC_HALF_ANGLE, CH_S2C},
+    constants::{BLOCK_ARC_HALF_ANGLE, BLOCK_HIT_STAMINA_COST, CH_S2C},
     messages::S2C,
 };
 
@@ -51,12 +51,23 @@ pub fn apply_damage(
         if let Some(st) = states.0.get_mut(&ev.target) {
             // Активный блок ПОЛНОСТЬЮ гасит удар во фронтальной полусфере (±90° от
             // ПОВОРОТА МОДЕЛИ, st.rot — не от курсора). Сзади и без блока — проходит.
-            let blocked = st.blocking
-                && source_pos
-                    .map(|sp| block_absorbs(st.pos, st.rot, sp, BLOCK_ARC_HALF_ANGLE))
-                    .unwrap_or(false);
+            // Блок гасит удар ПОЛНОСТЬЮ (0 урона) во фронтальной полусфере, НО
+            // только если хватает стамины на поглощение удара. Не хватило —
+            // щит «пробит»: урон проходит (а щит и так опустится на клиенте/сервере,
+            // т.к. tick_abilities снимает blocking при stamina < порога).
+            let in_arc = source_pos
+                .map(|sp| block_absorbs(st.pos, st.rot, sp, BLOCK_ARC_HALF_ANGLE))
+                .unwrap_or(false);
+            let blocked =
+                st.blocking && in_arc && st.abilities.stamina >= BLOCK_HIT_STAMINA_COST;
             let amount = if blocked { 0 } else { ev.amount };
             st.hp -= amount;
+
+            // Поглощённый удар стоит стамины. Когда она опустится ниже порога —
+            // следующий удар уже не заблокируется (щит опущен).
+            if blocked {
+                st.abilities.stamina = (st.abilities.stamina - BLOCK_HIT_STAMINA_COST).max(0.0);
+            }
 
             // todo not work info! here
             println!(

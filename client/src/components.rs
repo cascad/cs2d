@@ -141,6 +141,10 @@ pub struct Corpse {
 #[derive(Component)]
 pub struct NpcMarker(pub u32);
 
+/// Тип неписи на клиенте (какой набор спрайтов рисовать).
+#[derive(Component, Clone, Copy)]
+pub struct NpcKindC(pub protocol::messages::NpcKind);
+
 /// Покадровая анимация скелета (8 направлений × 8 кадров отдельными PNG).
 #[derive(Component)]
 pub struct NpcAnim {

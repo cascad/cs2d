@@ -12,6 +12,29 @@ use crate::{
     resources::{AppliedSeqs, NpcMode, Npcs, PendingInputs, PlayerStates, Reveals, ServerTickTimer, SnapshotHistory, WallGridRes}, utils::push_history
 };
 
+/// Эффективный ввод тика: свежий пакет (его запоминаем в `last`), иначе
+/// ПРОДЛЕВАЕМ последний (но гасим разовый `dash` — он только по свежему нажатию).
+/// Возвращает `None`, если ввода ещё не было.
+///
+/// Зачем: сеть/джиттер регулярно дают серверные тики без свежего пакета. Раньше
+/// на таких тиках блок/движение считались «отпущенными», блок сбрасывался и в эти
+/// окна удары пробивали. Продление последнего ввода держит блок/движение стабильно.
+pub fn effective_input(
+    fresh: Option<&InputState>,
+    last: &mut Option<InputState>,
+) -> Option<InputState> {
+    match fresh {
+        Some(inp) => {
+            *last = Some(inp.clone());
+            Some(inp.clone())
+        }
+        None => last.clone().map(|mut i| {
+            i.dash = false;
+            i
+        }),
+    }
+}
+
 /// Server tick: applies pending inputs with sliding wall collision, broadcasts snapshot, and records history
 pub fn server_tick(
     time: Res<Time>,
@@ -49,7 +72,13 @@ pub fn server_tick(
     // Тикаем способности и движение ВСЕХ живых игроков (стамина/кулдауны идут
     // даже без ввода — иначе регенерация бы зависала).
     for (&_id, st) in states.0.iter_mut() {
-        let input = latest.get(&_id);
+        // Эффективный ввод этого тика: свежий пакет, иначе ПРОДЛЕВАЕМ последний.
+        // Сеть/джиттер регулярно дают тики без пакета; раньше на них блок/движение
+        // считались «отпущенными» → блок сбрасывался (нужен повторный замах
+        // BLOCK_ESTABLISH_TIME) и в эти окна удары пробивали. У продлённого ввода
+        // гасим разовый рывок (dash только по свежему нажатию, без автоповтора).
+        let input_owned: Option<InputState> = effective_input(latest.get(&_id), &mut st.last_input);
+        let input = input_owned.as_ref();
 
         let mut wish = Vec2::ZERO;
         let (mut want_block, mut want_dash) = (false, false);
@@ -162,6 +191,8 @@ pub fn server_tick(
             facing: n.facing,
             hp: n.hp,
             aggro: n.mode == NpcMode::Chase,
+            kind: n.kind,
+            attacking: n.attack_anim > 0.0,
         })
         .collect();
 
@@ -248,5 +279,53 @@ mod tests {
         let p = grid.slide_circle(start, Vec2::new(5.0, 0.0), r);
         assert!(p.x + r <= 1e-3, "не должен пробивать стену: {p:?}");
         assert!(p.x >= start.x - 1e-4, "не должен откатываться назад: {p:?}");
+    }
+
+    fn input(block: bool, dash: bool) -> InputState {
+        InputState {
+            seq: 1,
+            up: false,
+            down: false,
+            left: false,
+            right: false,
+            rotation: 0.0,
+            stance: protocol::messages::Stance::Standing,
+            timestamp: 0.0,
+            block,
+            dash,
+        }
+    }
+
+    #[test]
+    fn effective_input_holds_block_across_missing_packets() {
+        // Свежий пакет: блок зажат — запоминается и применяется как есть.
+        let mut last = None;
+        let fresh = input(true, false);
+        let eff = effective_input(Some(&fresh), &mut last).expect("есть ввод");
+        assert!(eff.block, "свежий блок применяется");
+        assert!(last.is_some(), "свежий ввод запомнен");
+
+        // Следующий тик БЕЗ пакета: блок ПРОДЛЕВАЕТСЯ (не сбрасывается), иначе
+        // в такие окна удары пробивали бы блок.
+        let eff2 = effective_input(None, &mut last).expect("продлён последний");
+        assert!(eff2.block, "блок держится на тике без свежего пакета");
+    }
+
+    #[test]
+    fn effective_input_dash_is_one_shot_not_repeated() {
+        // Свежий рывок применяется один раз...
+        let mut last = None;
+        let fresh = input(false, true);
+        let eff = effective_input(Some(&fresh), &mut last).expect("есть ввод");
+        assert!(eff.dash, "свежий рывок применяется");
+        // ...но при продлении (нет пакета) рывок гасится — без автоповтора.
+        let eff2 = effective_input(None, &mut last).expect("продлён последний");
+        assert!(!eff2.dash, "продлённый ввод не повторяет разовый рывок");
+    }
+
+    #[test]
+    fn effective_input_none_without_any_history() {
+        let mut last = None;
+        assert!(effective_input(None, &mut last).is_none(), "ввода ещё не было");
     }
 }

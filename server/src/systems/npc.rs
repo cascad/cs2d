@@ -7,11 +7,12 @@ use bevy_quinnet::server::QuinnetServer;
 use protocol::{
     abilities::screen_speed_norm,
     constants::{
-        CH_S2C, NPC_ATTACK_COOLDOWN, NPC_ATTACK_DAMAGE, NPC_ATTACK_RANGE, NPC_CHASE_SPEED,
-        NPC_GIVEUP_TIME, NPC_HP, NPC_RADIUS, NPC_SIGHT_RADIUS, NPC_SPEED, PLAYER_SIZE,
+        CH_S2C, NPC_ATTACK_ANIM, NPC_ATTACK_COOLDOWN, NPC_ATTACK_DAMAGE, NPC_ATTACK_RANGE,
+        NPC_CHASE_SPEED, NPC_GIVEUP_TIME, NPC_HP, NPC_RADIUS, NPC_SIGHT_RADIUS, NPC_SPEED,
+        PLAYER_SIZE,
     },
     maps,
-    messages::S2C,
+    messages::{NpcKind, S2C},
 };
 
 use crate::{
@@ -56,13 +57,21 @@ pub fn setup_npcs(
 
 fn spawn_npc(npcs: &mut Npcs, id_counter: &mut NpcIdCounter, route: usize, wp: usize, pos: Vec2) {
     id_counter.0 += 1;
+    let id = id_counter.0;
+    // Чередуем типы по чётности id → на карте всегда смесь скелетов и зомби.
+    let kind = if id % 2 == 0 {
+        NpcKind::Zombie
+    } else {
+        NpcKind::Skeleton
+    };
     let facing = std::f32::consts::FRAC_PI_2; // смотрит «вниз» по умолчанию
     npcs.0.insert(
-        id_counter.0,
+        id,
         Npc {
             pos,
             facing,
             hp: NPC_HP,
+            kind,
             mode: NpcMode::Wander,
             route,
             wp,
@@ -70,6 +79,7 @@ fn spawn_npc(npcs: &mut Npcs, id_counter: &mut NpcIdCounter, route: usize, wp: u
             target_pos: pos,
             lost_timer: 0.0,
             attack_cd: 0.0,
+            attack_anim: 0.0,
             home: pos,
         },
     );
@@ -92,7 +102,7 @@ pub fn npc_ai(
     let dt = time.delta_secs();
 
     // 1) урон по неписям (от игроков) + смерти
-    let mut deaths: Vec<(u32, Vec2, f32)> = Vec::new();
+    let mut deaths: Vec<(u32, Vec2, f32, NpcKind)> = Vec::new();
     for ev in npc_dmg.read() {
         if let Some(n) = npcs.0.get_mut(&ev.target) {
             n.hp -= ev.amount;
@@ -100,11 +110,11 @@ pub fn npc_ai(
             n.mode = NpcMode::Chase;
             n.lost_timer = 0.0;
             if n.hp <= 0 {
-                deaths.push((ev.target, n.pos, n.facing));
+                deaths.push((ev.target, n.pos, n.facing, n.kind));
             }
         }
     }
-    for (id, _, _) in &deaths {
+    for (id, _, _, _) in &deaths {
         npcs.0.remove(id);
     }
 
@@ -113,6 +123,7 @@ pub fn npc_ai(
 
     for (&nid, n) in npcs.0.iter_mut() {
         n.attack_cd = (n.attack_cd - dt).max(0.0);
+        n.attack_anim = (n.attack_anim - dt).max(0.0);
 
         // ближайший игрок в радиусе и без стены на линии
         let mut seen: Option<(u64, Vec2, f32)> = None;
@@ -135,6 +146,7 @@ pub fn npc_ai(
             let in_range = d2 <= NPC_ATTACK_RANGE * NPC_ATTACK_RANGE;
             if in_range && n.attack_cd <= 0.0 {
                 n.attack_cd = NPC_ATTACK_COOLDOWN;
+                n.attack_anim = NPC_ATTACK_ANIM;
                 dmg.write(DamageEvent {
                     target: pid,
                     amount: NPC_ATTACK_DAMAGE,
@@ -209,14 +221,43 @@ pub fn npc_ai(
         }
     }
 
+    // 2.5) NPC↔NPC: скелеты не проходят сквозь друг друга (иначе при наложении не
+    // видно, что их несколько). Разруливаем попарно, выталкивая каждого на
+    // половину перекрытия. Толкаем ЧЕРЕЗ slide_circle, чтобы не продавить в стену.
+    let npc_min_sep = NPC_RADIUS * 2.0;
+    let ids: Vec<u32> = npcs.0.keys().copied().collect();
+    for i in 0..ids.len() {
+        for j in (i + 1)..ids.len() {
+            let pi = npcs.0[&ids[i]].pos;
+            let pj = npcs.0[&ids[j]].pos;
+            let off = pi - pj;
+            let d = off.length();
+            // совпали почти точка-в-точку → растолкнём по детерминированной оси
+            let push = if d > 1e-3 {
+                off / d * ((npc_min_sep - d) * 0.5)
+            } else {
+                Vec2::new(npc_min_sep * 0.5, 0.0)
+            };
+            if d >= npc_min_sep {
+                continue;
+            }
+            if let Some(n) = npcs.0.get_mut(&ids[i]) {
+                n.pos = walls.0.slide_circle(n.pos, push, NPC_RADIUS);
+            }
+            if let Some(n) = npcs.0.get_mut(&ids[j]) {
+                n.pos = walls.0.slide_circle(n.pos, -push, NPC_RADIUS);
+            }
+        }
+    }
+
     // 3) рассылаем смерти (труп/анимация смерти на клиенте)
     if !deaths.is_empty() {
         let endpoint = server.endpoint_mut();
-        for (id, pos, facing) in deaths {
+        for (id, pos, facing, kind) in deaths {
             endpoint
                 .broadcast_message_on(
                     CH_S2C,
-                    S2C::NpcDied { id, x: pos.x, y: pos.y, facing },
+                    S2C::NpcDied { id, x: pos.x, y: pos.y, facing, kind },
                 )
                 .ok();
         }

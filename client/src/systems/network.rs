@@ -62,13 +62,16 @@ pub struct NetCtx<'w, 's> {
     /// Анимации актёров по marker — чтобы запускать удар у удалённых игроков.
     pub q_anim: Query<'w, 's, (&'static PlayerMarker, &'static mut crate::components::ActorAnim)>,
 
-    // НЕПИСИ (скелеты)
-    pub skeleton: Option<Res<'w, crate::systems::npc::SkeletonAnims>>,
+    // НЕПИСИ (скелеты/зомби)
+    pub skeleton: Option<Res<'w, crate::systems::npc::NpcAnims>>,
     pub spawned_npcs: ResMut<'w, crate::systems::npc::SpawnedNpcs>,
     pub q_npc: Query<'w, 's, (Entity, &'static crate::components::NpcMarker)>,
 
     /// Общий реестр трупов (скелеты + игроки) с лимитом MAX_CORPSES.
     pub corpses: ResMut<'w, crate::resources::Corpses>,
+
+    pub meshes: ResMut<'w, Assets<Mesh>>,
+    pub materials: ResMut<'w, Assets<ColorMaterial>>,
 }
 
 pub fn receive_server_messages(mut client: ResMut<QuinnetClient>, mut net: NetCtx) {
@@ -341,15 +344,24 @@ pub fn receive_server_messages(mut client: ResMut<QuinnetClient>, mut net: NetCt
             // ===================================================
             // 7.5) MELEE-ВЗМАХ (визуал)
             // ===================================================
-            S2C::MeleeFx { attacker_id, from: _, dir: _ } => {
-                // локальному игроку анимация удара уже запущена при клике;
-                // удалённому — запускаем одноразовую анимацию удара рыцаря.
+            S2C::MeleeFx {
+                attacker_id,
+                from,
+                dir,
+            } => {
                 if attacker_id != net.my.id {
                     for (marker, mut anim) in net.q_anim.iter_mut() {
                         if marker.0 == attacker_id {
                             anim.start_action(crate::components::AnimState::Attack);
                         }
                     }
+                    crate::systems::melee::spawn_player_melee_decal(
+                        &mut net.commands,
+                        &mut net.meshes,
+                        &mut net.materials,
+                        from,
+                        dir,
+                    );
                 }
             }
 
@@ -425,15 +437,16 @@ pub fn receive_server_messages(mut client: ResMut<QuinnetClient>, mut net: NetCt
             // ===================================================
             // 9) СМЕРТЬ НЕПИСЯ (скелета) → труп
             // ===================================================
-            S2C::NpcDied { id, x, y, facing } => {
+            S2C::NpcDied { id, x, y, facing, kind } => {
                 if let Some((ent, _)) = net.q_npc.iter().find(|(_, m)| m.0 == id) {
                     net.commands.entity(ent).despawn();
                 }
                 net.spawned_npcs.0.remove(&id);
                 if let Some(anims) = net.skeleton.as_deref() {
-                    let corpse_ent = crate::systems::npc::spawn_skeleton_corpse(
+                    let corpse_ent = crate::systems::npc::spawn_npc_corpse(
                         &mut net.commands,
                         anims,
+                        kind,
                         Vec2::new(x, y),
                         facing,
                     );

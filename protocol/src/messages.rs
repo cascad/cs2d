@@ -65,13 +65,23 @@ pub enum S2C {
         player_id: u64,
         dir: Vec2,
     },
-    /// Скелет-непись погиб: клиент проигрывает анимацию смерти (труп) в `facing`.
+    /// Непись погибла: клиент проигрывает анимацию смерти (труп) в `facing`.
+    /// `kind` задаёт, чьи кадры рисовать (скелет/зомби).
     NpcDied {
         id: u32,
         x: f32,
         y: f32,
         facing: f32,
+        kind: NpcKind,
     },
+}
+
+/// Тип неписи — определяет набор спрайтов на клиенте. ИИ/логика общие для всех.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum NpcKind {
+    #[default]
+    Skeleton,
+    Zombie,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -144,6 +154,9 @@ pub struct NpcSnapshot {
     pub facing: f32,
     pub hp: i32,
     pub aggro: bool,
+    pub kind: NpcKind,
+    /// Идёт ли сейчас анимация атаки (для проигрывания удара на клиенте).
+    pub attacking: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]

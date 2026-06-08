@@ -7,10 +7,11 @@ use crate::utils::check_hit_lag_comp;
 use bevy::prelude::*;
 use bevy_quinnet::server::QuinnetServer;
 use protocol::abilities::AbilityConfig;
-use protocol::combat::in_melee_swath;
+use protocol::combat::in_melee_sector;
 use protocol::constants::{
     CH_C2S, CH_S2C, GRENADE_RADIUS, GRENADE_USAGE_COOLDOWN, HITBOX_RADIUS, MAX_LAG_COMP,
-    MELEE_DAMAGE, MELEE_HALF_WIDTH, MELEE_HIT_DELAY, MELEE_RANGE, NPC_RADIUS, SHOOT_RIFLE_DAMAGE,
+    MELEE_DAMAGE, MELEE_HALF_ANGLE, MELEE_HALF_WIDTH, MELEE_HIT_DELAY, MELEE_RANGE, NPC_RADIUS,
+    SHOOT_RIFLE_DAMAGE,
 };
 use protocol::messages::{C2S, GrenadeEvent, S2C, ShootFx};
 
@@ -241,8 +242,8 @@ pub fn process_c2s_messages(
 }
 
 /// Наносит урон от запланированных ударов, когда подошёл момент «середины
-/// взмаха». Зона — ПОЛОСА постоянной ширины от ЦЕНТРА атакующего (capsule), цели
-/// считаем по их ТЕКУЩИМ позициям → меньше «промахов» по движущимся скелетам.
+/// взмаха». Зона — 90°-сектор с постоянной шириной (не сужается вблизи); цели
+/// считаем по их ТЕКУЩИМ позициям.
 pub fn resolve_melees(
     mut pending: ResMut<PendingMelees>,
     states: Res<PlayerStates>,
@@ -270,8 +271,15 @@ pub fn resolve_melees(
             if tid == m.attacker {
                 continue;
             }
-            if in_melee_swath(from, m.dir, tst.pos, HITBOX_RADIUS, MELEE_RANGE, MELEE_HALF_WIDTH)
-                && !walls.0.segment_blocked(from, tst.pos, 0.001)
+            if in_melee_sector(
+                from,
+                m.dir,
+                tst.pos,
+                HITBOX_RADIUS,
+                MELEE_RANGE,
+                MELEE_HALF_ANGLE,
+                MELEE_HALF_WIDTH,
+            ) && !walls.0.segment_blocked(from, tst.pos, 0.001)
             {
                 damage_events.write(DamageEvent {
                     target: tid,
@@ -283,8 +291,15 @@ pub fn resolve_melees(
             }
         }
         for (&nid, npc) in npcs.0.iter() {
-            if in_melee_swath(from, m.dir, npc.pos, NPC_MELEE_HITBOX, MELEE_RANGE, MELEE_HALF_WIDTH)
-                && !walls.0.segment_blocked(from, npc.pos, 0.001)
+            if in_melee_sector(
+                from,
+                m.dir,
+                npc.pos,
+                NPC_MELEE_HITBOX,
+                MELEE_RANGE,
+                MELEE_HALF_ANGLE,
+                MELEE_HALF_WIDTH,
+            ) && !walls.0.segment_blocked(from, npc.pos, 0.001)
             {
                 npc_damage_events.write(NpcDamageEvent {
                     target: nid,

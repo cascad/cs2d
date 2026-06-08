@@ -53,6 +53,10 @@ jobs:
           - os: ubuntu-latest
             kind: linux-x86_64
             bin_ext: ""
+          # macOS на Apple Silicon (M-серия): рантайм arm64 нативно
+          - os: macos-14
+            kind: macos-arm64
+            bin_ext: ""
     steps:
       - uses: actions/checkout@v4
 

@@ -209,11 +209,19 @@ fn menu_cleanup(
 
 // ===== Ввод строки =====
 
+/// Состояние авто-повтора Backspace (зажатие): задержка до старта и шаг повтора.
+#[derive(Default)]
+struct BackspaceRepeat {
+    held: f32, // сколько уже удерживается
+    acc: f32,  // накопитель для интервала повтора
+}
+
 fn menu_typing(
     mut addr: ResMut<ServerAddr>,
     mut q_value: Query<&mut Text, With<AddrValue>>,
     keys: Res<ButtonInput<KeyCode>>,
     time: Res<Time>,
+    mut bs: Local<BackspaceRepeat>,
 ) {
     // Добавлялка
     let mut push_if = |kc: KeyCode, ch: char| {
@@ -248,9 +256,29 @@ fn menu_typing(
         addr.0.push(':');
     }
 
-    // Backspace / Escape
+    // Backspace: первое нажатие стирает сразу; при удержании — авто-повтор после
+    // короткой задержки (как в обычных полях ввода).
+    const BS_INITIAL_DELAY: f32 = 0.35; // пауза перед автоповтором
+    const BS_REPEAT_RATE: f32 = 0.04; // интервал автоповтора (≈25 симв/сек)
     if keys.just_pressed(KeyCode::Backspace) {
         addr.0.pop();
+        bs.held = 0.0;
+        bs.acc = 0.0;
+    } else if keys.pressed(KeyCode::Backspace) {
+        let dt = time.delta_secs();
+        bs.held += dt;
+        if bs.held >= BS_INITIAL_DELAY {
+            bs.acc += dt;
+            while bs.acc >= BS_REPEAT_RATE {
+                bs.acc -= BS_REPEAT_RATE;
+                if addr.0.pop().is_none() {
+                    break;
+                }
+            }
+        }
+    } else {
+        bs.held = 0.0;
+        bs.acc = 0.0;
     }
     if keys.just_pressed(KeyCode::Escape) {
         std::process::exit(0);

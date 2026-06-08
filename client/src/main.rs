@@ -180,7 +180,7 @@ fn main() {
                 setup,
                 setup_fixed_level,
                 setup_iso,
-                crate::systems::npc::setup_skeletons,
+                crate::systems::npc::setup_npc_anims,
                 setup_grenade_ui,
                 setup_stamina_ui,
                 setup_cooldowns_ui,
@@ -236,6 +236,7 @@ fn main() {
                     crate::systems::npc::interpolate_npcs,
                     crate::systems::npc::animate_skeletons,
                     crate::systems::npc::animate_skeleton_corpses,
+                    crate::systems::npc::spawn_npc_attack_decals,
                 )
                     .chain(),
                 // проекция мир→экран: ПОСЛЕ всех, кто двигает WorldPos, и ДО камеры

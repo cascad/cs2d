@@ -14,6 +14,9 @@ pub struct AbilityConfig {
     pub stamina_max: f32,
     pub stamina_regen: f32,
     pub block_drain: f32,
+    /// Минимум стамины, чтобы держать щит поднятым. Не хватает — щит опускается
+    /// (и удар проходит). Совпадает со стоимостью поглощения одного удара.
+    pub block_min_stamina: f32,
     pub dash_cost: f32,
     pub melee_cost: f32,
     pub move_speed: f32,
@@ -38,6 +41,7 @@ impl Default for AbilityConfig {
             stamina_max: STAMINA_MAX,
             stamina_regen: STAMINA_REGEN_PER_SEC,
             block_drain: BLOCK_STAMINA_DRAIN_PER_SEC,
+            block_min_stamina: BLOCK_HIT_STAMINA_COST,
             dash_cost: DASH_STAMINA_COST,
             melee_cost: MELEE_STAMINA_COST,
             move_speed: MOVE_SPEED,
@@ -211,12 +215,17 @@ pub fn tick_abilities(
         a.facing = turn_toward(a.facing, inp.aim, cfg.turn_rate * dt);
     }
 
-    // блок: держится ВСЁ время, пока зажата mouse2 (после короткого замаха);
-    // нельзя блокировать во время рывка/удара. Стамину не тратит — не пропадает.
+    // блок: держится, пока зажата mouse2 (после короткого замаха) И ПОКА ХВАТАЕТ
+    // стамины. Кулдауна нет; удержание само по себе стамину НЕ тратит (списывается
+    // только при попадании по блоку — на сервере). Если стамины не хватает на
+    // удар (< block_min_stamina) — щит ОПУСКАЕТСЯ, и удар проходит; как только
+    // стамина восстановится выше порога, щит поднимается снова (мгновенно, замах
+    // уже накоплен). Заряд копим независимо от стамины, чтобы не было повторного
+    // «замаха» каждый раз при просадке.
     let mut blocking = false;
     if inp.want_block && a.dash_left <= 0.0 && a.attack_lock_left <= 0.0 {
         a.block_charge += dt;
-        if a.block_charge >= cfg.block_establish {
+        if a.block_charge >= cfg.block_establish && a.stamina >= cfg.block_min_stamina {
             blocking = true;
         }
     } else {
@@ -247,7 +256,8 @@ pub fn tick_abilities(
     // блок и рывок. Одинаково на клиенте и сервере → без рассинхрона.
     let speed = speed * screen_speed_norm(move_dir);
 
-    // регенерация стамины (блок больше не тратит стамину, копим всегда)
+    // стамина: удержание блока ничего не стоит (расход только при попадании по
+    // блоку — считается на сервере), поэтому просто восстанавливаем со временем.
     a.stamina = (a.stamina + cfg.stamina_regen * dt).min(cfg.stamina_max);
 
     AbilityOutput {
@@ -344,6 +354,57 @@ mod tests {
         // выравниванием экранной скорости для направления (1,0)
         let want = MOVE_SPEED * BLOCK_MOVE_MULT * screen_speed_norm(Vec2::new(1.0, 0.0));
         assert!((out.speed - want).abs() < 1e-3, "блок = шаг: {}", out.speed);
+    }
+
+    #[test]
+    fn holding_block_does_not_drain_stamina_and_never_drops() {
+        // Блок не имеет кулдауна и не тратит стамину сам по себе: пока кнопка
+        // зажата, он держится всё время и не «дёргается». Стамина даже растёт.
+        let mut a = Abilities {
+            stamina: 50.0,
+            ..Default::default()
+        };
+        // даём блоку установиться (короткий замах block_establish)
+        for _ in 0..20 {
+            tick_abilities(&mut a, &moving_right(false, true), 0.015, &cfg());
+        }
+        for _ in 0..4000 {
+            let out = tick_abilities(&mut a, &moving_right(false, true), 0.015, &cfg());
+            assert!(out.blocking, "блок не должен спадать, пока зажата кнопка");
+        }
+        assert!(
+            (a.stamina - STAMINA_MAX).abs() < 1e-3,
+            "удержание блока не тратит стамину (она восстанавливается)"
+        );
+    }
+
+    #[test]
+    fn block_drops_when_out_of_stamina_then_returns_after_regen() {
+        // Стамины нет: щит НЕ поднимается, даже если кнопка зажата (урон пройдёт).
+        // Когда стамина восстановится выше порога — щит снова встаёт (замах уже
+        // накоплен, без повторной задержки).
+        let cfg = cfg();
+        let mut a = Abilities {
+            stamina: 0.0,
+            ..Default::default()
+        };
+        // ~0.15с удержания: замах накопился (>=block_establish), но стамина < порога
+        let mut out = tick_abilities(&mut a, &moving_right(false, true), 0.01, &cfg);
+        for _ in 0..14 {
+            out = tick_abilities(&mut a, &moving_right(false, true), 0.01, &cfg);
+        }
+        assert!(
+            a.stamina < cfg.block_min_stamina,
+            "стамина ещё ниже порога: {}",
+            a.stamina
+        );
+        assert!(!out.blocking, "без стамины щит опущен, урон проходит");
+        // держим дальше — стамина регенерится выше порога, щит поднимается
+        for _ in 0..200 {
+            out = tick_abilities(&mut a, &moving_right(false, true), 0.01, &cfg);
+        }
+        assert!(a.stamina >= cfg.block_min_stamina);
+        assert!(out.blocking, "после восстановления стамины щит снова держит");
     }
 
     #[test]
