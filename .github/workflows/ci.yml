@@ -88,7 +88,14 @@ jobs:
           cp "target/release/client${{ matrix.bin_ext }}" "$OUT/"
           cp "target/release/server${{ matrix.bin_ext }}" "$OUT/"
           # Ассеты кладём РЯДОМ с бинарями — клиент ищет их в каталоге exe.
+          if [ ! -d assets ]; then echo "::error::папка assets отсутствует в репозитории"; exit 1; fi
           cp -r assets "$OUT/"
+          # шрифты обязательны (без них не строится даже меню)
+          for f in FiraSans-Regular.ttf FiraSans-Bold.ttf FiraMono-Medium.ttf; do
+            if [ ! -f "$OUT/assets/fonts/$f" ]; then
+              echo "::error::в пакет не попал шрифт assets/fonts/$f"; exit 1
+            fi
+          done
           cat > "$OUT/HOW_TO_RUN.txt" <<'EOF'
           CS2D — как запустить:
             1) Запустите server (server.exe / ./server) — он держит игровой мир.

@@ -10,6 +10,7 @@ mod ui;
 
 // +++ добавили +++
 mod app_state;
+mod lobby;
 mod menu;
 
 use std::collections::VecDeque;

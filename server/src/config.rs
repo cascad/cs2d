@@ -14,8 +14,19 @@ pub struct ServerConfig {
     /// IP интерфейса для прослушивания. `0.0.0.0` — все интерфейсы (LAN/интернет),
     /// `127.0.0.1` — только локально.
     pub ip: String,
-    /// UDP-порт (QUIC).
+    /// UDP-порт (QUIC). На этом же номере порта поднимается TCP-листенер меты
+    /// для мини-лобби клиента (см. `net::start_meta_endpoint`).
     pub port: u16,
+    /// Человекочитаемое имя сервера — показывается в списке серверов клиента.
+    #[serde(default = "default_name")]
+    pub name: String,
+    /// Лимит игроков (для отображения в лобби). `0` — лимит не задаётся.
+    #[serde(default)]
+    pub max_players: u32,
+}
+
+fn default_name() -> String {
+    "CS2D Server".to_string()
 }
 
 impl Default for ServerConfig {
@@ -23,6 +34,8 @@ impl Default for ServerConfig {
         Self {
             ip: "0.0.0.0".to_string(),
             port: 6000,
+            name: default_name(),
+            max_players: 0,
         }
     }
 }
@@ -84,7 +97,9 @@ pub fn load_or_create() -> ServerConfig {
             let header = "# Конфиг сервера CS2D.\n\
                 # ip = \"0.0.0.0\"  — слушать на всех интерфейсах (LAN/интернет)\n\
                 # ip = \"127.0.0.1\" — только локально\n\
-                # port — UDP-порт (QUIC)\n";
+                # port — UDP-порт (QUIC); на этом же порту отвечает мета для лобби (TCP)\n\
+                # name — имя сервера в списке серверов клиента\n\
+                # max_players — лимит игроков для отображения (0 — без лимита)\n";
             match toml::to_string_pretty(&cfg) {
                 Ok(body) => {
                     if let Err(e) = std::fs::write(&path, format!("{header}{body}")) {

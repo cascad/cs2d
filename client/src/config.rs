@@ -8,12 +8,26 @@ use std::path::PathBuf;
 
 const FILE_NAME: &str = "client_config.toml";
 
+/// Один сервер из списка лобби. Адрес — строка `ip:port` (тот же порт, что и
+/// игровой; на нём же отвечает мета по TCP).
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct ServerEntry {
+    /// Имя по умолчанию (если мета сервера недоступна, покажем его).
+    #[serde(default)]
+    pub name: Option<String>,
+    /// Адрес `ip:port`.
+    pub address: String,
+}
+
 #[derive(Resource, Serialize, Deserialize, Clone, Debug)]
 pub struct ClientConfig {
-    /// IP/хост сервера, к которому подключаемся по умолчанию.
+    /// IP/хост сервера, к которому подключаемся по умолчанию (поле ручного ввода).
     pub ip: String,
     /// UDP-порт сервера (QUIC).
     pub port: u16,
+    /// Список серверов для мини-лобби. Каждый проверяется на активность.
+    #[serde(default)]
+    pub servers: Vec<ServerEntry>,
 }
 
 impl Default for ClientConfig {
@@ -21,6 +35,10 @@ impl Default for ClientConfig {
         Self {
             ip: "127.0.0.1".to_string(),
             port: 6000,
+            servers: vec![ServerEntry {
+                name: Some("Локальный сервер".to_string()),
+                address: "127.0.0.1:6000".to_string(),
+            }],
         }
     }
 }
@@ -78,7 +96,13 @@ pub fn load_or_create() -> ClientConfig {
         Err(_) => {
             let cfg = ClientConfig::default();
             let header = "# Конфиг клиента CS2D.\n\
-                # ip/port сервера — подставятся в меню как адрес по умолчанию.\n";
+                # ip/port — адрес по умолчанию для строки ручного ввода в меню.\n\
+                # [[servers]] — список серверов для мини-лобби; каждый\n\
+                #   проверяется на активность (имя/игроки берутся с сервера).\n\
+                #   Пример:\n\
+                #   [[servers]]\n\
+                #   name = \"My Server\"\n\
+                #   address = \"100.67.225.13:6000\"\n";
             match toml::to_string_pretty(&cfg) {
                 Ok(body) => {
                     if let Err(e) = std::fs::write(&path, format!("{header}{body}")) {

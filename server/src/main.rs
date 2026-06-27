@@ -112,6 +112,7 @@ fn main() {
                 apply_damage,
                 update_grenades,
                 broadcast_grenade_syncs,
+                update_meta_player_count,
                 // handle_player_died,
                 // do_respawn,
                 // purge_deaths, // todo revert???

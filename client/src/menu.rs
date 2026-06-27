@@ -8,6 +8,9 @@ use protocol::quinnet_adapter::build_channels_config;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 use crate::app_state::AppState;
+use crate::lobby::{
+    drain_query_results, spawn_server_queries, LobbyServer, LobbyServers, QueryInbox, ServerStatus,
+};
 use crate::resources::CurrentConnId;
 
 // ===== Ресурсы / компоненты =====
@@ -21,6 +24,15 @@ pub struct ConnectError(pub Option<String>); // хранит текст посл
 #[derive(Resource)]
 pub struct ConnectTimeout(pub Timer);
 
+/// Таймер периодического переопроса серверов в лобби (авто-рефреш статусов).
+#[derive(Resource)]
+struct LobbyRefreshTimer(Timer);
+impl Default for LobbyRefreshTimer {
+    fn default() -> Self {
+        Self(Timer::from_seconds(3.0, TimerMode::Repeating))
+    }
+}
+
 #[derive(Component)]
 struct MenuRoot;
 #[derive(Component)]
@@ -28,9 +40,22 @@ struct MenuCamera;
 #[derive(Component)]
 struct AddrValue; // текст набранного адреса (моношрифт)
 #[derive(Component)]
-struct ConnectButton; // прямоугольник-кнопка
+struct ConnectButton; // прямоугольник-кнопка ручного ввода
 #[derive(Component)]
 struct ErrorText; // текст ошибки
+
+/// Кликабельная строка сервера из лобби. Хранит индекс в `LobbyServers` и адрес.
+#[derive(Component)]
+struct ServerRowButton {
+    index: usize,
+    address: String,
+}
+/// Текст имени сервера в строке (обновляется при получении меты).
+#[derive(Component)]
+struct ServerRowName(usize);
+/// Текст статуса сервера в строке (проверка/онлайн N/M/офлайн).
+#[derive(Component)]
+struct ServerRowStatus(usize);
 
 // ===== Плагин =====
 
@@ -39,13 +64,20 @@ impl Plugin for MenuPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<ServerAddr>()
             .init_resource::<ConnectError>()
+            .init_resource::<LobbyServers>()
+            .init_resource::<QueryInbox>()
+            .init_resource::<LobbyRefreshTimer>()
             .add_systems(OnEnter(AppState::Menu), menu_setup)
             .add_systems(
                 Update,
                 (
                     menu_typing,          // ввод адреса + курсор
                     try_connect_enter,    // Enter → попытка коннекта с показом ошибки
-                    click_connect_button, // клик по кнопке → то же
+                    click_connect_button, // клик по кнопке ручного ввода → то же
+                    click_server_row,     // клик по серверу из списка → коннект
+                    auto_refresh_lobby,   // периодический переопрос серверов
+                    drain_query_results,  // приём результатов опроса серверов
+                    refresh_lobby_ui,     // отрисовка статусов серверов
                     render_connect_error, // обновление текста ошибки
                 )
                     .run_if(in_state(AppState::Menu)),
@@ -59,13 +91,37 @@ impl Plugin for MenuPlugin {
 fn menu_setup(
     mut commands: Commands,
     mut addr: ResMut<ServerAddr>,
+    mut servers: ResMut<LobbyServers>,
+    mut refresh: ResMut<LobbyRefreshTimer>,
+    inbox: Res<QueryInbox>,
     cfg: Res<crate::config::ClientConfig>,
     assets: Res<AssetServer>,
 ) {
+    // следующий авто-рефреш — через полный интервал после первого опроса
+    refresh.0.reset();
     if addr.0.is_empty() {
         // адрес по умолчанию берём из конфига рядом с бинарём (client_config.toml)
         addr.0 = cfg.address();
     }
+
+    // Строим список серверов лобби из конфига (статус — «проверка»), чистим
+    // инбокс и запускаем фоновый опрос каждого сервера.
+    servers.0 = cfg
+        .servers
+        .iter()
+        .map(|s| LobbyServer {
+            name: s.name.clone().unwrap_or_else(|| s.address.clone()),
+            address: s.address.clone(),
+            status: ServerStatus::Checking,
+        })
+        .collect();
+    if let Ok(mut buf) = inbox.0.lock() {
+        buf.clear();
+    }
+    spawn_server_queries(&servers, &inbox);
+
+    let font = assets.load("fonts/FiraSans-Regular.ttf");
+    let mono = assets.load("fonts/FiraMono-Medium.ttf");
 
     // Камера для меню
     commands.spawn((Camera2d::default(), MenuCamera));
@@ -84,10 +140,10 @@ fn menu_setup(
             MenuRoot,
         ))
         .with_children(|root| {
-            // Карточка
+            // Карточка лобби
             root.spawn((
                 Node {
-                    width: Val::Px(560.0),
+                    width: Val::Px(620.0),
                     padding: UiRect::all(Val::Px(16.0)),
                     flex_direction: FlexDirection::Column,
                     row_gap: Val::Px(14.0),
@@ -98,16 +154,53 @@ fn menu_setup(
             .with_children(|card| {
                 // Заголовок
                 card.spawn((
-                    Text::new("Подключение к серверу"),
+                    Text::new("Выбор сервера"),
                     TextFont {
-                        font: assets.load("fonts/FiraSans-Regular.ttf"),
+                        font: font.clone(),
                         font_size: 28.0,
                         ..default()
                     },
                     TextColor(Color::WHITE),
                 ));
 
-                // Ряд: метка + значение (моношрифт)
+                // ── Список серверов ───────────────────────────────────────
+                if servers.0.is_empty() {
+                    card.spawn((
+                        Text::new(
+                            "В client_config.toml нет серверов.\nДобавь [[servers]] или введи адрес вручную ниже.",
+                        ),
+                        TextFont {
+                            font: font.clone(),
+                            font_size: 16.0,
+                            ..default()
+                        },
+                        TextColor(Color::srgba(0.8, 0.8, 0.85, 1.0)),
+                    ));
+                } else {
+                    card.spawn((Node {
+                        flex_direction: FlexDirection::Column,
+                        row_gap: Val::Px(8.0),
+                        ..default()
+                    },))
+                        .with_children(|list| {
+                            for (i, s) in servers.0.iter().enumerate() {
+                                spawn_server_row(list, i, s, &font, &mono);
+                            }
+                        });
+                }
+
+                // ── Разделитель / ручной ввод ─────────────────────────────
+                card.spawn((
+                    Text::new("Или подключись по адресу вручную:"),
+                    TextFont {
+                        font: font.clone(),
+                        font_size: 14.0,
+                        ..default()
+                    },
+                    TextColor(Color::srgba(0.7, 0.7, 0.75, 1.0)),
+                ));
+
+                // Ряд: метка + значение (моношрифт) + кнопка
                 card.spawn((
                     Node {
                         padding: UiRect::all(Val::Px(12.0)),
@@ -119,21 +212,19 @@ fn menu_setup(
                     BackgroundColor(Color::srgba(0.08, 0.09, 0.12, 1.0)),
                 ))
                 .with_children(|row| {
-                    // Метка
                     row.spawn((
                         Text::new("Адрес:"),
                         TextFont {
-                            font: assets.load("fonts/FiraSans-Regular.ttf"),
+                            font: font.clone(),
                             font_size: 22.0,
                             ..default()
                         },
                         TextColor(Color::srgba(0.85, 0.85, 0.9, 1.0)),
                     ));
-                    // Значение + курсор
                     row.spawn((
                         Text::new(""),
                         TextFont {
-                            font: assets.load("fonts/FiraMono-Medium.ttf"),
+                            font: mono.clone(),
                             font_size: 22.0,
                             ..default()
                         },
@@ -142,24 +233,11 @@ fn menu_setup(
                     ));
                 });
 
-                // Подсказка
-                card.spawn((
-                    Text::new(
-                        "Введи адрес (например: 127.0.0.1:6000) и нажми Enter.\nEsc — выйти.",
-                    ),
-                    TextFont {
-                        font: assets.load("fonts/FiraSans-Regular.ttf"),
-                        font_size: 16.0,
-                        ..default()
-                    },
-                    TextColor(Color::srgba(0.8, 0.8, 0.85, 1.0)),
-                ));
-
                 // Текст ошибки (пустой, станет красным при ошибке)
                 card.spawn((
                     Text::new(""),
                     TextFont {
-                        font: assets.load("fonts/FiraSans-Regular.ttf"),
+                        font: font.clone(),
                         font_size: 16.0,
                         ..default()
                     },
@@ -167,29 +245,139 @@ fn menu_setup(
                     ErrorText,
                 ));
 
-                // Кнопка «Подключиться» (кликабельная благодаря Interaction)
+                // Кнопка «Подключиться» (ручной ввод)
                 card.spawn((
                     Node {
                         padding: UiRect::all(Val::Px(12.0)),
+                        justify_content: JustifyContent::Center,
                         ..default()
                     },
                     BackgroundColor(Color::srgba(0.15, 0.2, 0.3, 1.0)),
-                    Interaction::None, // важно: иначе клик по любому UI зачтётся как нажатие кнопки
+                    Interaction::None,
                     ConnectButton,
                 ))
                 .with_children(|btn| {
                     btn.spawn((
-                        Text::new("Подключиться"),
+                        Text::new("Подключиться по адресу"),
                         TextFont {
-                            font: assets.load("fonts/FiraSans-Regular.ttf"),
+                            font: font.clone(),
                             font_size: 20.0,
                             ..default()
                         },
                         TextColor(Color::WHITE),
                     ));
                 });
+
+                // Подсказка
+                card.spawn((
+                    Text::new("Клик по серверу — подключиться. Enter — по адресу. Esc — выйти."),
+                    TextFont {
+                        font: font.clone(),
+                        font_size: 13.0,
+                        ..default()
+                    },
+                    TextColor(Color::srgba(0.6, 0.6, 0.65, 1.0)),
+                ));
             });
         });
+}
+
+/// Спавнит одну кликабельную строку сервера: слева имя, справа статус.
+fn spawn_server_row(
+    list: &mut ChildSpawnerCommands<'_>,
+    index: usize,
+    s: &LobbyServer,
+    font: &Handle<Font>,
+    mono: &Handle<Font>,
+) {
+    list.spawn((
+        Node {
+            padding: UiRect::all(Val::Px(12.0)),
+            flex_direction: FlexDirection::Row,
+            align_items: AlignItems::Center,
+            justify_content: JustifyContent::SpaceBetween,
+            column_gap: Val::Px(12.0),
+            ..default()
+        },
+        BackgroundColor(row_bg(&s.status)),
+        Interaction::None,
+        ServerRowButton {
+            index,
+            address: s.address.clone(),
+        },
+    ))
+    .with_children(|row| {
+        // Левая часть: имя + адрес (моноширинно)
+        row.spawn((Node {
+            flex_direction: FlexDirection::Column,
+            row_gap: Val::Px(2.0),
+            ..default()
+        },))
+            .with_children(|col| {
+                col.spawn((
+                    Text::new(s.name.clone()),
+                    TextFont {
+                        font: font.clone(),
+                        font_size: 20.0,
+                        ..default()
+                    },
+                    TextColor(Color::WHITE),
+                    ServerRowName(index),
+                ));
+                col.spawn((
+                    Text::new(s.address.clone()),
+                    TextFont {
+                        font: mono.clone(),
+                        font_size: 13.0,
+                        ..default()
+                    },
+                    TextColor(Color::srgba(0.6, 0.62, 0.68, 1.0)),
+                ));
+            });
+        // Правая часть: статус
+        row.spawn((
+            Text::new(status_text(&s.status)),
+            TextFont {
+                font: font.clone(),
+                font_size: 16.0,
+                ..default()
+            },
+            TextColor(status_color(&s.status)),
+            ServerRowStatus(index),
+        ));
+    });
+}
+
+/// Текстовое представление статуса для правой части строки.
+fn status_text(status: &ServerStatus) -> String {
+    match status {
+        ServerStatus::Checking => "проверка…".to_string(),
+        ServerStatus::Online { players, max } => {
+            if *max > 0 {
+                format!("● онлайн   {players}/{max}")
+            } else {
+                format!("● онлайн   {players}")
+            }
+        }
+        ServerStatus::Offline => "○ офлайн".to_string(),
+    }
+}
+
+fn status_color(status: &ServerStatus) -> Color {
+    match status {
+        ServerStatus::Checking => Color::srgba(0.75, 0.75, 0.5, 1.0),
+        ServerStatus::Online { .. } => Color::srgba(0.4, 0.9, 0.45, 1.0),
+        ServerStatus::Offline => Color::srgba(0.85, 0.4, 0.4, 1.0),
+    }
+}
+
+/// Фон строки: онлайн подсвечиваем (зеленоватый), офлайн приглушаем.
+fn row_bg(status: &ServerStatus) -> Color {
+    match status {
+        ServerStatus::Checking => Color::srgba(0.10, 0.11, 0.14, 1.0),
+        ServerStatus::Online { .. } => Color::srgba(0.12, 0.20, 0.14, 1.0),
+        ServerStatus::Offline => Color::srgba(0.10, 0.08, 0.09, 1.0),
+    }
 }
 
 fn menu_cleanup(
@@ -352,6 +540,89 @@ fn click_connect_button(
                     err.0 = Some(format!("Сервер не найден: {}", e));
                 }
             }
+        }
+    }
+}
+
+// ===== Коннект по клику на сервер из списка =====
+
+fn click_server_row(
+    mut q_btn: Query<(&Interaction, &ServerRowButton), Changed<Interaction>>,
+    servers: Res<LobbyServers>,
+    mut client: ResMut<QuinnetClient>,
+    mut next: ResMut<NextState<AppState>>,
+    mut commands: Commands,
+    mut err: ResMut<ConnectError>,
+) {
+    for (interaction, row) in &mut q_btn {
+        if *interaction != Interaction::Pressed {
+            continue;
+        }
+        // Предупредим, если сервер не онлайн, но попытку всё равно сделаем —
+        // мета могла не успеть прийти, а подключиться пользователь хочет сейчас.
+        if let Some(s) = servers.0.get(row.index) {
+            if s.status == ServerStatus::Offline {
+                info!("сервер {} помечен офлайн, пробуем подключиться всё равно", row.address);
+            }
+        }
+        match do_connect(&row.address, &mut client, &mut commands) {
+            Ok(_) => {
+                info!("✅ connected, going Connecting");
+                err.0 = None;
+                commands.insert_resource(ConnectTimeout(Timer::from_seconds(3.0, TimerMode::Once)));
+                next.set(AppState::Connecting);
+            }
+            Err(e) => {
+                info!("⛔ stay in Menu: {}", e);
+                err.0 = Some(format!("Сервер не найден: {}", e));
+            }
+        }
+    }
+}
+
+// ===== Авто-рефреш списка серверов =====
+
+/// Периодически (по таймеру) перезапускает опрос всех серверов лобби, не сбрасывая
+/// текущие статусы — чтобы не мигало, а просто обновлялось число игроков/доступность.
+fn auto_refresh_lobby(
+    time: Res<Time>,
+    mut refresh: ResMut<LobbyRefreshTimer>,
+    servers: Res<LobbyServers>,
+    inbox: Res<QueryInbox>,
+) {
+    if servers.0.is_empty() {
+        return;
+    }
+    if refresh.0.tick(time.delta()).just_finished() {
+        spawn_server_queries(&servers, &inbox);
+    }
+}
+
+// ===== Перерисовка статусов серверов в списке =====
+
+fn refresh_lobby_ui(
+    servers: Res<LobbyServers>,
+    mut q_name: Query<(&ServerRowName, &mut Text), Without<ServerRowStatus>>,
+    mut q_status: Query<(&ServerRowStatus, &mut Text, &mut TextColor), Without<ServerRowName>>,
+    mut q_rows: Query<(&ServerRowButton, &mut BackgroundColor)>,
+) {
+    if !servers.is_changed() {
+        return;
+    }
+    for (name, mut text) in &mut q_name {
+        if let Some(s) = servers.0.get(name.0) {
+            *text = Text::new(s.name.clone());
+        }
+    }
+    for (status, mut text, mut color) in &mut q_status {
+        if let Some(s) = servers.0.get(status.0) {
+            *text = Text::new(status_text(&s.status));
+            *color = TextColor(status_color(&s.status));
+        }
+    }
+    for (row, mut bg) in &mut q_rows {
+        if let Some(s) = servers.0.get(row.index) {
+            *bg = BackgroundColor(row_bg(&s.status));
         }
     }
 }
