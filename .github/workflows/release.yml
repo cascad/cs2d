@@ -66,9 +66,12 @@ jobs:
             libwayland-dev libxkbcommon-dev
 
       - name: Build (release)
-        run: |
-          cargo build --release --target ${{ matrix.target }} --bin client
-          cargo build --release --target ${{ matrix.target }} --bin server
+        # shell: bash — на windows-раннере без этого шаг идёт через PowerShell,
+        # где проверяется код возврата только последней команды (падение client
+        # маскируется успехом server). Одна команда на обе цели + bash → шаг
+        # корректно падает при любой ошибке сборки.
+        shell: bash
+        run: cargo build --release --target ${{ matrix.target }} --bin client --bin server
 
       - name: Prepare package
         shell: bash

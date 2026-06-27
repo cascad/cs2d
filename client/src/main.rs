@@ -12,6 +12,7 @@ mod ui;
 mod app_state;
 mod lobby;
 mod menu;
+mod pause_menu;
 
 use std::collections::VecDeque;
 
@@ -163,6 +164,7 @@ fn main() {
         // состояния и меню
         .insert_state(AppState::Menu)
         .add_plugins(MenuPlugin)
+        .add_plugins(crate::pause_menu::PauseMenuPlugin)
         // --- шрифты грузим заранее (нужны в меню тоже) ---
         .add_systems(Startup, (load_ui_font, setup_console_ui))
         // --- консоль логов работает в любом состоянии (тоггл по `~`) ---

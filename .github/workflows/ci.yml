@@ -75,9 +75,13 @@ jobs:
             libwayland-dev libxkbcommon-dev
 
       - name: Build (release)
-        run: |
-          cargo build --release --bin client
-          cargo build --release --bin server
+        # shell: bash — иначе на windows-раннере шаг идёт через PowerShell, где
+        # в многострочном run проверяется код возврата ТОЛЬКО последней команды:
+        # падение сборки client маскируется успешной сборкой server, шаг зеленеет,
+        # а client.exe не создаётся → assemble падает на cp. Одна команда на обе
+        # цели + bash гарантируют корректное падение при любой ошибке.
+        shell: bash
+        run: cargo build --release --bin client --bin server
 
       - name: Assemble package
         shell: bash
