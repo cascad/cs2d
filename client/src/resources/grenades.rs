@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
 use bevy::prelude::*;
+use protocol::constants::GRENADE_USAGE_COOLDOWN;
 use protocol::messages::GrenadeEvent;
 
 #[derive(Resource)]
@@ -8,7 +9,9 @@ pub struct GrenadeCooldown(pub Timer);
 
 impl Default for GrenadeCooldown {
     fn default() -> Self {
-        GrenadeCooldown(Timer::from_seconds(2.0, TimerMode::Once))
+        // совпадает с серверным `GRENADE_USAGE_COOLDOWN`, чтобы клиентский rate-limit
+        // не расходился с авторитетным КД.
+        GrenadeCooldown(Timer::from_seconds(GRENADE_USAGE_COOLDOWN as f32, TimerMode::Once))
     }
 }
 

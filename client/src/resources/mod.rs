@@ -128,6 +128,12 @@ pub struct WallAabbCache(pub Vec<(Vec2, Vec2)>); // (min, max)
 #[derive(Resource, Default)]
 pub struct WallGridRes(pub protocol::geom::WallGrid);
 
+/// Сетка препятствий, БЛОКИРУЮЩИХ ВЗГЛЯД (стены + глухие колонны, без бочек/
+/// сундуков). Используется туманом войны, чтобы за низкими пропами было видно —
+/// строго так же, как серверный куллинг (`VisionGridRes` на сервере).
+#[derive(Resource, Default)]
+pub struct VisionGridRes(pub protocol::geom::WallGrid);
+
 #[derive(Resource, Default)]
 pub struct LastKnownPos(pub HashMap<u64, (Vec2, f32)>); // id -> (pos, rot)
 

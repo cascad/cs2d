@@ -1,22 +1,31 @@
-use crate::events::DamageEvent;
-use crate::resources::{GrenadeSyncTimer, Grenades, PlayerStates, WallAabbs, WallGridRes};
+use crate::events::{DamageEvent, NpcDamageEvent};
+use crate::resources::{GrenadeSyncTimer, Grenades, Npcs, PlayerStates, WallAabbs, WallGridRes};
 use bevy::prelude::*;
 use protocol::geom::WallGrid;
 use bevy_quinnet::server::QuinnetServer;
 use protocol::constants::{
     CH_S2C, GRENADE_AIR_DRAG_PER_SEC, GRENADE_BLAST_RADIUS, GRENADE_BOUNCE_DAMPING,
-    GRENADE_DAMAGE_COEFF, GRENADE_RADIUS, GRENADE_RESTITUTION, GRENADE_STOP_SPEED, MAX_STEP,
-    SEPARATION_EPS,
+    GRENADE_DAMAGE_COEFF, GRENADE_MAX_BOUNCES, GRENADE_RADIUS, GRENADE_RESTITUTION,
+    GRENADE_STOP_SPEED, MAX_STEP, SEPARATION_EPS,
 };
 use protocol::messages::S2C;
 
 // ---- основная система -------------------------------------------------------
 
+/// Урон по дистанции от эпицентра: линейно спадает от центра к краю радиуса.
+#[inline]
+fn blast_damage(dist: f32) -> i32 {
+    let falloff = ((GRENADE_BLAST_RADIUS - dist) / GRENADE_BLAST_RADIUS).clamp(0.0, 1.0);
+    ((falloff * 50.0) * GRENADE_DAMAGE_COEFF) as i32
+}
+
 /// Обновляем гранаты: полёт с отскоком + взрыв по таймеру (без Rapier)
 pub fn update_grenades(
     mut grenades: ResMut<Grenades>,
     states: Res<PlayerStates>,
+    npcs: Res<Npcs>,
     mut damage_events: MessageWriter<DamageEvent>,
+    mut npc_damage_events: MessageWriter<NpcDamageEvent>,
     time: Res<Time>,
     walls: Res<WallAabbs>,
     wall_grid: Res<WallGridRes>,
@@ -25,8 +34,12 @@ pub fn update_grenades(
     let now = time.elapsed_secs_f64();
     let dt = time.delta_secs();
 
+    // Гранаты, которые надо взорвать в этом тике (id уникальны — `remove` ниже сам
+    // отсеет повторы, если граната попала и под лимит отскоков, и под таймер).
+    let mut to_explode: Vec<u64> = Vec::new();
+
     // --- Полёт + отскоки ---
-    for (&_id, gs) in grenades.0.iter_mut() {
+    for (&id, gs) in grenades.0.iter_mut() {
         let phys = GrenadePhys {
             from: gs.ev.from,
             dir: gs.ev.dir,
@@ -35,31 +48,48 @@ pub fn update_grenades(
             elapsed: (now - gs.created) as f32,
         };
 
-        let res = step_grenade(&phys, dt, &walls.0);
+        // Можно ли ещё отскочить? Достигнув лимита, при ударе о стену граната
+        // не отражается, а разбивается на месте контакта.
+        let can_bounce = gs.bounces < GRENADE_MAX_BOUNCES;
+        let prev_pos = gs.pos;
+        let res = step_grenade(&phys, dt, &walls.0, can_bounce);
 
         // Обновляем параметры «якорной» формулы, НЕ трогая created (таймер взрыва прежний).
         gs.ev.dir = res.state.dir;
         gs.ev.speed = res.state.speed;
         gs.ev.from = res.state.from;
+        gs.pos = res.pos;
+        gs.vel = res.state.dir * res.state.speed;
 
-        // Мгновенная синхра при рикошете (чтобы клиент сразу «схлопнулся» на новую траекторию)
-        if res.bounced {
-            let ep = server.endpoint_mut();
-            let vel = res.state.dir * res.state.speed;
-            let _ = ep.broadcast_message_on(
-                CH_S2C,
-                &S2C::GrenadeSync {
-                    id: gs.ev.id,
-                    pos: res.pos,
-                    vel,
-                    ts: now,
-                },
-            );
+        // Копим пройденный путь; достигнув лимита — банка падает в указанной точке.
+        gs.traveled += (res.pos - prev_pos).length();
+        if gs.traveled >= gs.travel_limit {
+            to_explode.push(id);
+        }
+
+        if res.hit_wall {
+            if res.bounced {
+                // Отскок засчитан: мгновенная синхра, чтобы клиент сразу «схлопнулся»
+                // на новую траекторию.
+                gs.bounces += 1;
+                let ep = server.endpoint_mut();
+                let _ = ep.broadcast_message_on(
+                    CH_S2C,
+                    &S2C::GrenadeSync {
+                        id,
+                        pos: res.pos,
+                        vel: gs.vel,
+                        ts: now,
+                    },
+                );
+            } else {
+                // Лимит отскоков исчерпан — разбивается о стену прямо сейчас.
+                to_explode.push(id);
+            }
         }
     }
 
     // --- Взрывы по таймеру ---
-    let mut to_explode = Vec::new();
     for (&id, state) in grenades.0.iter() {
         if now - state.created >= state.ev.timer as f64 {
             to_explode.push(id);
@@ -69,8 +99,9 @@ pub fn update_grenades(
     // --- Нанесение урона и удаление ---
     for &id in &to_explode {
         if let Some(gs) = grenades.0.remove(&id) {
-            let lifetime = (now - gs.created) as f32;
-            let pos = gs.ev.from + gs.ev.dir * gs.ev.speed * lifetime;
+            // Точку детонации берём из реально отслеженной позиции (а не из
+            // пересчёта «якорной» формулы) — она учитывает отскоки и удар о стену.
+            let pos = gs.pos;
 
             // Сообщаем всем клиентам точку детонации
             let ep = server.endpoint_mut();
@@ -79,23 +110,29 @@ pub fn update_grenades(
 
             info!("💥 Grenade {} exploded at {:?}", gs.ev.id, pos);
 
+            // Урон ИГРОКАМ в радиусе (за глухой стеной не проходит).
             for (&pid, pst) in states.0.iter() {
                 let dist = (pst.pos - pos).length();
-                if dist <= GRENADE_BLAST_RADIUS {
-                    // проверка, не перекрыта ли линия взрыв→игрок стеной
-                    if los_blocked_by_walls(pos, pst.pos, &wall_grid.0) {
-                        // За стенкой — урон не проходит
-                        continue;
-                    }
-
-                    let base_damage = ((GRENADE_BLAST_RADIUS - dist) / GRENADE_BLAST_RADIUS * 50.0)
-                        * GRENADE_DAMAGE_COEFF;
+                if dist <= GRENADE_BLAST_RADIUS && !los_blocked_by_walls(pos, pst.pos, &wall_grid.0)
+                {
                     damage_events.write(DamageEvent {
                         target: pid,
-                        amount: base_damage as i32,
+                        amount: blast_damage(dist),
                         source: Some(gs.ev.id),
                         source_pos: None,
                         npc_source: None,
+                    });
+                }
+            }
+
+            // Урон НЕПИСЯМ (скелетам) в радиусе — те же правила (стена гасит урон).
+            for (&nid, npc) in npcs.0.iter() {
+                let dist = (npc.pos - pos).length();
+                if dist <= GRENADE_BLAST_RADIUS && !los_blocked_by_walls(pos, npc.pos, &wall_grid.0)
+                {
+                    npc_damage_events.write(NpcDamageEvent {
+                        target: nid,
+                        amount: blast_damage(dist),
                     });
                 }
             }
@@ -118,17 +155,13 @@ pub fn broadcast_grenade_syncs(
 
     let ts = time.elapsed_secs_f64();
     for (_id, gs) in grenades.0.iter() {
-        // Текущая точка и скорость из вашей «якорной» формулы
-        let t = (ts - gs.created) as f32;
-        let pos = gs.ev.from + gs.ev.dir * gs.ev.speed * t;
-        let vel = gs.ev.dir * gs.ev.speed; // уже с drag/демпфом, т.к. выше их обновляем
-
+        // Берём реально отслеженные позицию/скорость (учтены drag и отскоки).
         let _ = ep.broadcast_message_on(
             CH_S2C,
             &S2C::GrenadeSync {
                 id: gs.ev.id,
-                pos,
-                vel,
+                pos: gs.pos,
+                vel: gs.vel,
                 ts,
             },
         );
@@ -148,18 +181,29 @@ pub struct GrenadePhys {
     pub elapsed: f32,
 }
 
-/// Результат шага: новое состояние, текущая позиция и был ли отскок.
+/// Результат шага: новое состояние, текущая позиция, был ли отскок и был ли
+/// вообще контакт со стеной (`hit_wall`). Когда отскоки исчерпаны
+/// (`can_bounce == false`), контакт даёт `hit_wall == true`, но `bounced == false`
+/// — вызывающий код подрывает гранату на месте.
 #[derive(Clone, Copy, Debug)]
 pub struct GrenadeStepResult {
     pub state: GrenadePhys,
     pub pos: Vec2,
     pub bounced: bool,
+    pub hit_wall: bool,
 }
 
 /// Один тик физики гранаты: полёт с воздушным затуханием и отскоком от стен.
 /// Чистая функция — без ECS/сети, чтобы её можно было прогнать в golden-тесте
-/// и поймать любые изменения в физике отскоков.
-pub fn step_grenade(s: &GrenadePhys, dt: f32, walls: &[(Vec2, Vec2)]) -> GrenadeStepResult {
+/// и поймать любые изменения в физике отскоков. `can_bounce` управляет реакцией
+/// на стену: `true` — отражаемся, `false` — останавливаемся в точке контакта
+/// (граната разобьётся снаружи).
+pub fn step_grenade(
+    s: &GrenadePhys,
+    dt: f32,
+    walls: &[(Vec2, Vec2)],
+    can_bounce: bool,
+) -> GrenadeStepResult {
     let t = s.elapsed;
     let mut pos = s.from + s.dir * s.speed * t;
 
@@ -177,6 +221,7 @@ pub fn step_grenade(s: &GrenadePhys, dt: f32, walls: &[(Vec2, Vec2)]) -> Grenade
     let mut dir = s.dir;
     let mut remaining = dir * speed * dt;
     let mut bounced = false;
+    let mut hit_wall = false;
 
     // Пошаговое движение с ограничением шага MAX_STEP.
     while remaining.length_squared() > 0.0 {
@@ -189,16 +234,21 @@ pub fn step_grenade(s: &GrenadePhys, dt: f32, walls: &[(Vec2, Vec2)]) -> Grenade
         if let Some((normal, corr)) = collide_circle_with_walls(proposed, GRENADE_RADIUS, walls) {
             // выталкиваем до касания (без «зазора»)
             pos = proposed + corr;
+            hit_wall = true;
 
-            // отражаем скорость относительно нормали + затухание
-            let v = dir * speed;
-            let reflected = v - 2.0 * v.dot(normal) * normal;
-            let new_speed = reflected.length() * GRENADE_RESTITUTION * GRENADE_BOUNCE_DAMPING;
+            if can_bounce {
+                // отражаем скорость относительно нормали + затухание
+                let v = dir * speed;
+                let reflected = v - 2.0 * v.dot(normal) * normal;
+                let new_speed = reflected.length() * GRENADE_RESTITUTION * GRENADE_BOUNCE_DAMPING;
 
-            dir = if new_speed > 0.0 { reflected / new_speed } else { dir };
-            speed = if new_speed < GRENADE_STOP_SPEED { 0.0 } else { new_speed };
-
-            bounced = true;
+                dir = if new_speed > 0.0 { reflected / new_speed } else { dir };
+                speed = if new_speed < GRENADE_STOP_SPEED { 0.0 } else { new_speed };
+                bounced = true;
+            } else {
+                // отскоки исчерпаны — гасим скорость, граната разобьётся снаружи
+                speed = 0.0;
+            }
             // после удара останавливаем перенос в этом кадре — стабильнее
             break;
         } else {
@@ -216,6 +266,7 @@ pub fn step_grenade(s: &GrenadePhys, dt: f32, walls: &[(Vec2, Vec2)]) -> Grenade
         },
         pos,
         bounced,
+        hit_wall,
     }
 }
 
@@ -352,7 +403,8 @@ mod tests {
         };
         let mut out = Vec::with_capacity(steps);
         for _ in 0..steps {
-            let res = step_grenade(&s, dt, &walls);
+            // golden фиксирует физику отскока — отскоки разрешены.
+            let res = step_grenade(&s, dt, &walls, true);
             out.push(res.pos);
             s = res.state;
         }

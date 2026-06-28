@@ -72,6 +72,14 @@ pub struct GrenadeState {
     pub created: f64,
     pub pos: Vec2,
     pub vel: Vec2,
+    /// Сколько раз снаряд уже отскочил от стены. Достигнув `GRENADE_MAX_BOUNCES`,
+    /// при следующем ударе о стену разбивается (детонация на месте контакта).
+    pub bounces: u32,
+    /// Предельная длина пути (мир. ед.) от точки спавна: банка взрывается, когда
+    /// пройденный путь достигнет лимита (игрок указал точку ближе максимума).
+    /// Накапливается по реальной траектории — корректно и при будущих отскоках.
+    pub travel_limit: f32,
+    pub traveled: f32,
 }
 
 #[derive(Resource, Default)]
@@ -122,6 +130,12 @@ pub struct WallAabbs(pub Vec<(Vec2, Vec2)>);
 /// Пространственная сетка стен для быстрых отрезковых запросов (рейкаст/LOS).
 #[derive(Resource, Default)]
 pub struct WallGridRes(pub protocol::geom::WallGrid);
+
+/// Сетка препятствий, БЛОКИРУЮЩИХ ВЗГЛЯД (стены + глухие пропы-колонны, без
+/// бочек/сундуков). Используется ТОЛЬКО для куллинга видимости в снапшоте, чтобы
+/// за низкими пропами врага было видно, а движение по-прежнему блокировалось.
+#[derive(Resource, Default)]
+pub struct VisionGridRes(pub protocol::geom::WallGrid);
 
 #[derive(Resource, Default, Clone)]
 pub struct SpawnPoints(pub Vec<Vec2>);

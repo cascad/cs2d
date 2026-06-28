@@ -8,9 +8,9 @@ use bevy::prelude::*;
 use bevy_quinnet::server::QuinnetServer;
 use protocol::combat::in_melee_sector;
 use protocol::constants::{
-    CH_C2S, CH_S2C, GRENADE_RADIUS, GRENADE_USAGE_COOLDOWN, HITBOX_RADIUS, MAX_LAG_COMP,
-    MELEE_DAMAGE, MELEE_HALF_ANGLE, MELEE_HALF_WIDTH, MELEE_RANGE, NPC_RADIUS,
-    SHOOT_RIFLE_DAMAGE,
+    grenade_max_reach, CH_C2S, CH_S2C, GRENADE_RADIUS, GRENADE_SPEED, GRENADE_TIMER,
+    GRENADE_USAGE_COOLDOWN, HITBOX_RADIUS, MAX_LAG_COMP, MELEE_DAMAGE, MELEE_HALF_ANGLE,
+    MELEE_HALF_WIDTH, MELEE_RANGE, NPC_RADIUS, SHOOT_RIFLE_DAMAGE,
 };
 use protocol::messages::{C2S, GrenadeEvent, S2C, ShootFx};
 
@@ -141,52 +141,66 @@ pub fn process_c2s_messages(
                         continue; // Пропускаем бросок
                     }
 
-                    // Обновляем время последнего броска
-                    last_grenade.map.insert(client_id, now);
+                    // АВТОРИТЕТНОСТЬ СЕРВЕРА: точку броска берём из СЕРВЕРНОЙ позиции
+                    // игрока (не доверяем `ev.from`), скорость/таймер — из констант,
+                    // а направление считаем из присланной ЦЕЛИ (куда указал курсор).
+                    // Клиент задаёт только желаемую точку падения. Так механика
+                    // встроена в общий контракт сети, а не «на доверии».
+                    let origin = match states.0.get(&client_id) {
+                        Some(st) => st.pos,
+                        None => continue, // нет состояния игрока — бросать неоткуда
+                    };
 
-                    // Нормализуем присланный вектор (на всякий случай)
-                    let mut dir = ev.dir;
-                    if dir.length_squared() <= f32::EPSILON {
-                        // мусорный ввод — игнорим
+                    let to_target = ev.target - origin;
+                    if to_target.length_squared() <= f32::EPSILON {
+                        // цель совпала с игроком — мусорный ввод, игнорим
                         continue;
                     }
-                    dir = dir.normalize();
+                    let dir = to_target.normalize();
+
+                    // Кламп дальности: дальше максимума не улетит; ближе — взорвётся
+                    // в указанной точке (через лимит пройденного пути).
+                    let reach = grenade_max_reach();
+                    let want_dist = to_target.length().min(reach);
+                    let clamped_target = origin + dir * want_dist;
+
+                    // Обновляем время последнего броска (после валидации цели)
+                    last_grenade.map.insert(client_id, now);
 
                     // Смещаем точку спавна вперёд по направлению (радиус + небольшой запас),
                     // чтобы не родиться впритык к стене/игроку
-                    let spawn_from = ev.from + dir * (GRENADE_RADIUS + 1.0);
+                    let spawn_offset = GRENADE_RADIUS + 1.0;
+                    let spawn_from = origin + dir * spawn_offset;
+                    // Лимит пути считаем ОТ точки спавна (она уже сдвинута вперёд).
+                    let travel_limit = (want_dist - spawn_offset).max(0.0);
+
+                    let spawn_ev = GrenadeEvent {
+                        id: ev.id,
+                        from: spawn_from,
+                        dir, // нормализованный
+                        target: clamped_target,
+                        speed: GRENADE_SPEED,
+                        timer: GRENADE_TIMER,
+                        timestamp: ev.timestamp,
+                    };
 
                     // Заводим серверное состояние
                     grenades.0.insert(
                         ev.id,
                         GrenadeState {
-                            ev: GrenadeEvent {
-                                id: ev.id,
-                                from: spawn_from,
-                                dir,             // нормализованный
-                                speed: ev.speed, // фактический из клиента (или оставь константу, если у тебя фикс)
-                                timer: ev.timer, // фактический из клиента
-                                timestamp: ev.timestamp,
-                            },
+                            ev: spawn_ev.clone(),
                             created: now,
                             pos: spawn_from,
-                            vel: dir * ev.speed,
+                            vel: dir * GRENADE_SPEED,
+                            bounces: 0,
+                            travel_limit,
+                            traveled: 0.0,
                         },
                     );
 
                     let grenade_id = ev.id;
                     // и рассылаем всем клиентам, чтобы они визуализировали гранату
-                    let _ = endpoint.broadcast_message_on(
-                        CH_S2C,
-                        S2C::GrenadeSpawn(GrenadeEvent {
-                            id: ev.id,
-                            from: spawn_from,
-                            dir,
-                            speed: ev.speed, // не подменяем на константу
-                            timer: ev.timer,
-                            timestamp: ev.timestamp,
-                        }),
-                    );
+                    let _ = endpoint.broadcast_message_on(CH_S2C, S2C::GrenadeSpawn(spawn_ev));
 
                     info!("💣 Клиент {} бросил гранату {}", client_id, grenade_id);
                 }

@@ -169,6 +169,9 @@ pub struct GrenadeEvent {
     pub id: u64, // уникальный ID гранаты
     pub from: Vec2,
     pub dir: Vec2,
+    /// Желаемая точка падения (куда указал курсор). Сервер клампит её до
+    /// максимальной дальности и взрывает банку при достижении (или по таймеру).
+    pub target: Vec2,
     pub speed: f32,
     pub timer: f32, // время до взрыва
     pub timestamp: f64,

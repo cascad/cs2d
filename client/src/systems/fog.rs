@@ -4,29 +4,27 @@
 //! см. `server_tick`). Здесь — только визуал поверх этого:
 //!   1. `fade_unseen_players` — плавно гасит и деспавнит тех, кого сервер
 //!      перестал присылать (вышли из зоны видимости);
-//!   2. `setup_fog`/`update_fog` — «диабловское» затемнение карты на основе
-//!      ТЕКСТУРЫ тумана (по тайлу карты на тексель). Каждый кадр для каждого
-//!      текселя считаем LOS до игрока (per-tile shadowcasting), сглаживаем
-//!      темпорально (никаких рывков при повороте) и пишем альфу в текстуру.
-//!      Билинейная фильтрация спрайта даёт мягкую границу, а «исследованные,
-//!      но сейчас невидимые» тайлы остаются приглушённо видны (память карты).
+//!   2. `setup_fog`/`update_fog`/`apply_fog_tint` — «диабловское» затемнение
+//!      карты. Каждый кадр считаем LOS-конус по тайлам (видно/исследовано/не
+//!      виданное), сглаживаем темпорально, а затем УМНОЖАЕМ цвет спрайтов тайлов
+//!      (пол/стены/пропы) на яркость = 1−darkness. Тинтим сами спрайты карты —
+//!      эффект гарантированно виден (прежний оверлей-mesh не композился в этом
+//!      рендер-пути и тумана на экране не было).
 
-use bevy::asset::RenderAssetUsages;
-use bevy::image::{Image, ImageSampler};
-use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
-use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
-use bevy::sprite_render::AlphaMode2d;
 
 use crate::components::{LocalPlayer, PlayerMarker};
-use crate::render::{layers, world_to_screen};
-use crate::resources::{LastSeen, MyPlayer, SpawnedPlayers, WallGridRes};
+use crate::resources::{HpUiMap, LastSeen, MyPlayer, SpawnedPlayers, VisionGridRes};
 use crate::systems::level_fixed::{map_dims, TILE};
 use crate::systems::utils::time_in_seconds;
 
-// --- Плавное скрытие пропавших игроков ---
-const FADE_START: f64 = 0.20; // до этого возраста (сек без снапшота) — видно полностью
-const FADE_END: f64 = 0.60; // после — деспавн
+// --- Мгновенное скрытие пропавших из виду ---
+// Сервер режет снапшот по полю зрения: как только цель уходит из обзора, она
+// перестаёт приходить. Показывать «фантом» после этого нельзя (по просьбе) —
+// деспавним сразу. Крошечный порог (~интерп.-задержка + 1 тик) лишь сглаживает
+// одиночный потерянный пакет, чтобы не было мерцания, но на глаз это «мгновенно».
+pub(crate) const FADE_START: f64 = 0.0;
+pub(crate) const FADE_END: f64 = 0.10;
 
 /// Гасит альфу игроков (вместе с дочерним «стволом») по времени с последнего
 /// появления в снапшоте; полностью пропавших деспавнит и снимает с учёта, чтобы
@@ -36,6 +34,7 @@ pub fn fade_unseen_players(
     my: Res<MyPlayer>,
     mut last_seen: ResMut<LastSeen>,
     mut spawned: ResMut<SpawnedPlayers>,
+    mut hp_ui: ResMut<HpUiMap>,
     mut sets: ParamSet<(
         Query<(Entity, &PlayerMarker, Option<&Children>)>,
         Query<&mut Sprite>,
@@ -81,47 +80,67 @@ pub fn fade_unseen_players(
         commands.entity(e).despawn();
         spawned.0.remove(&id);
         last_seen.0.remove(&id);
+        // плавающая полоска HP — ОТДЕЛЬНАЯ сущность (не ребёнок игрока): без этого
+        // она «зависала в воздухе» там, где игрок пропал из виду. Снимаем вместе.
+        if let Some(ui) = hp_ui.0.remove(&id) {
+            commands.entity(ui).despawn();
+        }
     }
 }
 
 // ---------------------------------------------------------------------------
-// Затемнение карты через текстуру тумана (1 тексель = 1 тайл карты).
+// Туман войны через ПРЯМОЙ ТИНТ спрайтов карты (пол/стены/пропы), без отдельного
+// оверлея. Раньше затемнение рисовалось текстурой на mesh поверх сцены, но в
+// этом рендер-пути overlay не композился (на экране эффекта не было). Тут мы
+// считаем «темноту» по тайлам (LOS-конус + память), а затем УМНОЖАЕМ цвет
+// каждого спрайта тайла на яркость — это гарантированно видно, т.к. меняем сами
+// спрайты, которые точно отрисовываются.
 // ---------------------------------------------------------------------------
 
-// Туман войны (НЕ чёрный, серый): чётко виден «водораздел» между тем, что игрок
-// сейчас видит, и тем, что вне обзора. Видно сейчас — прозрачно; край обзора —
-// мягко гаснет; вне обзора/за стеной — заметно приглушено серым (но различимо).
-const DARK_VISIBLE: f32 = 0.0; // в куполе обзора и без стены на линии — без затемнения
-const DARK_EXPLORED: f32 = 0.45; // видели раньше / вне конуса — приглушено, но различимо
-const DARK_HIDDEN: f32 = 0.75; // никогда не видели — тёмно, но не чёрная дыра
+// Множитель ЯРКОСТИ = 1 - darkness. В конусе — полная яркость; вне конуса/за
+// стеной — заметно темнее (чтобы «водораздел» вижу/не-вижу читался сразу). Это
+// главные ручки силы тумана.
+const DARK_VISIBLE: f32 = 0.0; // в конусе и без стены на линии — без затемнения (яркость ×1.0)
+const DARK_EXPLORED: f32 = 0.5; // видели раньше / вне конуса — ×0.5 (явно темнее)
+const DARK_HIDDEN: f32 = 0.72; // никогда не видели — ×0.28 (тёмно, но различимо)
 
 /// Ближний радиус (мир. ед.), где видно ВСЕГДА, даже вне конуса зрения — игрок
-/// «чувствует» то, что прямо у ног/за спиной вплотную. Небольшой.
-const FOG_NEAR_RADIUS: f32 = 96.0;
+/// «чувствует» то, что прямо у ног/за спиной вплотную. Совпадает с серверным
+/// `NEAR_SIGHT_RADIUS`, чтобы подсветка тайлов и реально присланные враги сошлись.
+const FOG_NEAR_RADIUS: f32 = protocol::constants::NEAR_SIGHT_RADIUS;
 /// Радиус «полной видимости» (мир. ед.): внутри — без затемнения.
-const FOG_VIEW_FULL: f32 = 440.0;
+const FOG_VIEW_FULL: f32 = 460.0;
 /// Радиус края обзора (мир. ед.): от `FOG_VIEW_FULL` до него купол мягко гаснет;
 /// дальше считаем «не вижу». Меньше серверного `VIEW_RADIUS` (тот — про анти-чит
 /// куллинг по сети), чтобы граница купола РЕАЛЬНО попадала на экран и была видна.
-const FOG_VIEW_FADE: f32 = 820.0;
+const FOG_VIEW_FADE: f32 = 900.0;
 
-/// Цвет тумана (RGB), нейтрально-серый с лёгкой прохладцей: «невидимое» выглядит
-/// серым (по просьбе), а не чёрным и не синим. Заливается один раз; каждый кадр
-/// меняем только альфу.
-const FOG_RGB: [u8; 3] = [22, 23, 27];
 /// Скорость темпорального сглаживания (1/сек). Чем больше — тем резче переходы.
 const FOG_SMOOTH_K: f32 = 12.0;
 /// Сжатие стен при LOS, чтобы луч по грани не давал ложного перекрытия.
 const FOG_EPS: f32 = 0.5;
 
-#[derive(Component)]
-pub struct FogOverlay;
+/// Базовый цвет спрайта тайла (как при спавне) и его мировой центр. Туман каждый
+/// кадр умножает базовый цвет на яркость видимости в этой точке. База хранится,
+/// чтобы повторный множитель не «съедал» цвет; позиция — чтобы не зависеть от
+/// `WorldPos` (у пола/стен его нет, а добавление сломало бы их Z-слой).
+#[derive(Component, Clone, Copy)]
+pub struct FogTint {
+    pub base: Srgba,
+    pub pos: Vec2,
+}
 
-/// Состояние тумана: дискретная сетка по тайлам карты + сглаженная «темнота» и
-/// память «исследованного». Хранится отдельно от текстуры, чтобы сглаживать на CPU.
+impl FogTint {
+    #[inline]
+    pub fn new(color: Color, pos: Vec2) -> Self {
+        Self { base: color.to_srgba(), pos }
+    }
+}
+
+/// Состояние тумана: дискретная сетка по тайлам карты со сглаженной «темнотой» и
+/// памятью «исследованного». Сглаживание — на CPU, затем читается тинт-системой.
 #[derive(Resource)]
 pub struct FogState {
-    handle: Handle<Image>,
     cols: usize,
     rows: usize,
     map_w: f32,
@@ -138,89 +157,31 @@ impl FogState {
         let y = self.map_h * 0.5 - (iy as f32 + 0.5) * TILE;
         Vec2::new(x, y)
     }
+
+    /// «Темнота» (0..1) в точке мира — по тайлу, в котором она лежит. Вне карты —
+    /// считаем максимально тёмной (как «никогда не виданное»).
+    #[inline]
+    fn darkness_at(&self, world: Vec2) -> f32 {
+        let fx = (world.x + self.map_w * 0.5) / TILE;
+        let fy = (self.map_h * 0.5 - world.y) / TILE;
+        if fx < 0.0 || fy < 0.0 {
+            return DARK_HIDDEN;
+        }
+        let (ix, iy) = (fx as usize, fy as usize);
+        if ix >= self.cols || iy >= self.rows {
+            return DARK_HIDDEN;
+        }
+        self.darkness[iy * self.cols + ix]
+    }
 }
 
-pub fn setup_fog(
-    mut commands: Commands,
-    mut images: ResMut<Assets<Image>>,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<ColorMaterial>>,
-) {
+pub fn setup_fog(mut commands: Commands) {
     let (cols, rows) = map_dims();
     let map_w = cols as f32 * TILE;
     let map_h = rows as f32 * TILE;
     let n = cols * rows;
 
-    // Изначально вся карта «не исследована». RGB — холодный оттенок тумана,
-    // альфа — степень затемнения.
-    let init_alpha = (DARK_HIDDEN * 255.0) as u8;
-    let mut data = vec![0u8; n * 4];
-    for px in data.chunks_exact_mut(4) {
-        px[0] = FOG_RGB[0];
-        px[1] = FOG_RGB[1];
-        px[2] = FOG_RGB[2];
-        px[3] = init_alpha;
-    }
-
-    let mut image = Image::new(
-        Extent3d {
-            width: cols as u32,
-            height: rows as u32,
-            depth_or_array_layers: 1,
-        },
-        TextureDimension::D2,
-        data,
-        TextureFormat::Rgba8UnormSrgb,
-        RenderAssetUsages::RENDER_WORLD | RenderAssetUsages::MAIN_WORLD,
-    );
-    // Билинейная фильтрация → мягкая граница тумана при апскейле текселя до тайла.
-    image.sampler = ImageSampler::linear();
-
-    let handle = images.add(image);
-
-    // Туман натягиваем на изо-ромб карты (как пол), а не на экранный
-    // прямоугольник: тогда затемнение совпадает с проекцией пола/стен.
-    // UV: u по world.x слева-направо, v по world.y сверху-вниз (iy=0 — верхний ряд).
-    let hw = map_w * 0.5;
-    let hh = map_h * 0.5;
-    let corners = [
-        (Vec2::new(-hw, hh), [0.0, 0.0]),
-        (Vec2::new(hw, hh), [1.0, 0.0]),
-        (Vec2::new(hw, -hh), [1.0, 1.0]),
-        (Vec2::new(-hw, -hh), [0.0, 1.0]),
-    ];
-    let mut positions: Vec<[f32; 3]> = Vec::with_capacity(4);
-    let mut uvs: Vec<[f32; 2]> = Vec::with_capacity(4);
-    for (w, uv) in corners {
-        let s = world_to_screen(w);
-        positions.push([s.x, s.y, 0.0]);
-        uvs.push(uv);
-    }
-    let mut mesh = Mesh::new(
-        PrimitiveTopology::TriangleList,
-        RenderAssetUsages::RENDER_WORLD,
-    );
-    mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
-    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
-    mesh.insert_indices(Indices::U32(vec![0, 1, 2, 0, 2, 3]));
-    let mesh = meshes.add(mesh);
-
-    let mat = materials.add(ColorMaterial {
-        color: Color::WHITE,
-        texture: Some(handle.clone()),
-        alpha_mode: AlphaMode2d::Blend,
-        ..default()
-    });
-
-    commands.spawn((
-        Mesh2d(mesh),
-        MeshMaterial2d(mat),
-        Transform::from_xyz(0.0, 0.0, layers::FOG),
-        FogOverlay,
-    ));
-
     commands.insert_resource(FogState {
-        handle,
         cols,
         rows,
         map_w,
@@ -230,15 +191,14 @@ pub fn setup_fog(
     });
 }
 
-/// Каждый кадр пересчитываем видимость по тайлам (LOS до игрока), сглаживаем
-/// темпорально и заливаем альфу в текстуру тумана.
+/// Каждый кадр пересчитываем видимость по тайлам (LOS до игрока) и сглаживаем
+/// темпорально. Результат (сетка «темноты») читает [`apply_fog_tint`].
 pub fn update_fog(
     player_q: Query<&crate::render::WorldPos, With<LocalPlayer>>,
     aim: Res<crate::resources::AimAngle>,
-    walls: Res<WallGridRes>,
+    vision: Res<VisionGridRes>,
     time: Res<Time>,
     mut fog: ResMut<FogState>,
-    mut images: ResMut<Assets<Image>>,
 ) {
     let Ok(wp) = player_q.single() else { return };
     let player = wp.0;
@@ -276,7 +236,7 @@ pub fn update_fog(
                 } else {
                     player
                 };
-                !walls.0.segment_blocked(player, test, FOG_EPS)
+                !vision.0.segment_blocked(player, test, FOG_EPS)
             } else {
                 false
             };
@@ -298,15 +258,16 @@ pub fn update_fog(
             fog.darkness[i] += (target - fog.darkness[i]) * smooth;
         }
     }
+}
 
-    // Заливаем в текстуру (изменение через get_mut триггерит реаплоад на GPU).
-    if let Some(img) = images.get_mut(&fog.handle) {
-        if let Some(buf) = img.data.as_mut() {
-            for (i, d) in fog.darkness.iter().enumerate() {
-                let a = (d.clamp(0.0, 1.0) * 255.0) as u8;
-                let o = i * 4;
-                buf[o + 3] = a;
-            }
-        }
+/// Туман-войны как ТИНТ: каждый кадр умножаем базовый цвет спрайта тайла (пол/
+/// стены/пропы) на яркость = 1 − darkness в его тайле. В конусе — полная яркость,
+/// вне — приглушённо. Меняем сами спрайты карты, поэтому эффект гарантированно
+/// виден (в отличие от прежнего оверлея, который не композился).
+pub fn apply_fog_tint(fog: Res<FogState>, mut q: Query<(&FogTint, &mut Sprite)>) {
+    for (tint, mut sprite) in q.iter_mut() {
+        let b = (1.0 - fog.darkness_at(tint.pos)).clamp(0.0, 1.0);
+        let base = tint.base;
+        sprite.color = Color::srgba(base.red * b, base.green * b, base.blue * b, base.alpha);
     }
 }

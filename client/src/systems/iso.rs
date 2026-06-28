@@ -147,6 +147,7 @@ pub fn setup_iso(
             },
             tile_anchor,
             Transform::from_xyz(s.x, s.y, depth_z(*center, layers::FLOOR)),
+            crate::systems::fog::FogTint::new(tint, *center),
             Name::new("IsoFloor"),
         ));
     }

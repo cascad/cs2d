@@ -30,10 +30,10 @@ use systems::{
     bullet_lifecycle::bullet_lifecycle,
     connection::handle_connection_event,
     grenade_lifecycle::explosion_lifecycle, // grenade_lifecycle::grenade_lifecycle,
-    grenade_throw::grenade_throw,
+    grenade_throw::{grenade_throw, setup_grenade_aim, update_grenade_aim},
     input::change_stance,
     interpolate_with_snapshot::interpolate_with_snapshot,
-    melee::melee_arc_lifecycle,
+    melee::{melee_arc_lifecycle, setup_melee_hint, update_melee_hint},
     network::receive_server_messages,
     ping::send_ping,
     rotate_to_cursor::rotate_to_cursor,
@@ -52,11 +52,12 @@ use crate::{
     resources::grenades::{ClientGrenades, GrenadeCooldown, GrenadeStates},
     systems::{
         // +++ насос Connecting: ждём первый Snapshot, затем -> InGame +++
-        aim::{spawn_aim_marker, update_aim_to_mouse}, camera::CameraFollowPlugin, connecting_pump::connecting_pump, corpse_lc::corpse_lifecycle, ensure_my_id::ensure_my_id_from_conn, fog::{fade_unseen_players, setup_fog, update_fog}, grenade_lifecycle::spawn_grenades, iso::{animate_actors, setup_iso}, level_fixed::setup_fixed_level, network::apply_grenade_net, render_detonations::render_detonations, spawn_damage_popups::{spawn_damage_popups, update_damage_popups}, startup::load_ui_font, sync_hp_ui::{
+        aim::{spawn_aim_marker, update_aim_to_mouse}, camera::CameraFollowPlugin, connecting_pump::connecting_pump, corpse_lc::corpse_lifecycle, ensure_my_id::ensure_my_id_from_conn, fog::{apply_fog_tint, fade_unseen_players, setup_fog, update_fog}, grenade_lifecycle::spawn_grenades, iso::{animate_actors, setup_iso}, level_fixed::setup_fixed_level, network::apply_grenade_net, render_detonations::{animate_explosion_fx, render_detonations}, spawn_damage_popups::{spawn_damage_popups, update_damage_popups}, startup::load_ui_font, sync_hp_ui::{
             cleanup_hp_ui_on_player_remove, sync_hp_ui_position, update_hp_text_from_event,
         }, walls_cache::build_wall_aabb_cache
     },
     ui::cooldowns_ui::{setup_cooldowns_ui, update_cooldowns_ui},
+    ui::damage_flash::{setup_damage_flash, update_damage_flash},
     ui::grenade_ui::setup_grenade_ui,
     ui::hp_hud::{setup_hp_hud, update_hp_hud},
     ui::minimap::{setup_minimap, toggle_minimap, update_minimap},
@@ -118,6 +119,7 @@ fn main() {
         .insert_resource(GrenadeStates::default())
         .insert_resource(WallAabbCache::default())
         .insert_resource(WallGridRes::default())
+        .insert_resource(VisionGridRes::default())
         .insert_resource(LastKnownPos::default())
         .insert_resource(LastSeen::default())
         .insert_resource(LocalAbilities::default())
@@ -188,8 +190,11 @@ fn main() {
                 setup_stamina_ui,
                 setup_cooldowns_ui,
                 setup_hp_hud,
+                setup_damage_flash,
                 setup_fog,
                 setup_minimap,
+                setup_melee_hint,
+                setup_grenade_aim,
             ),
         )
         // --- PreUpdate: сетка/инпут и приём сообщений только в InGame ---
@@ -218,6 +223,7 @@ fn main() {
                 spawn_grenades,
                 apply_grenade_net,
                 render_detonations,
+                animate_explosion_fx,
                 //
                 explosion_lifecycle,
                 grenade_throw,
@@ -226,8 +232,10 @@ fn main() {
                 shoot_mouse,
                 melee_arc_lifecycle,
                 send_ping,
-                // туман: перестраиваем затемнение от позиции игрока (после движения)
+                // туман: пересчёт сетки видимости (после движения) и сразу тинт
+                // спрайтов карты по ней — затемнение видно прямо на полу/стенах.
                 update_fog,
+                apply_fog_tint,
                 // анимация направленных спрайтов: ПОСЛЕ движения WorldPos
                 animate_actors,
                 // засечка направления на кольце: ПОСЛЕ обновления Facing
@@ -254,6 +262,9 @@ fn main() {
                 update_stamina_ui,
                 update_cooldowns_ui,
                 update_hp_hud,
+                update_damage_flash,
+                update_melee_hint,
+                update_grenade_aim,
                 spawn_damage_popups,
                 update_damage_popups,
                 crate::systems::iso::flash_on_damage,

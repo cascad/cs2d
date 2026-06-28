@@ -123,6 +123,22 @@ pub struct Explosion {
     pub timer: Timer,
 }
 
+/// Анимированный слой взрыва (наземная волна / огненный шар / вспышка). За время
+/// жизни масштабируется `scale_from→scale_to`, поднимается по экрану на `rise`
+/// пикселей и плавно гаснет (альфа `alpha_from→0`). Так плоский круг превращается
+/// в «объёмный» всплеск. Альфу пишем в материал из [`ExplosionMaterial`].
+#[derive(Component)]
+pub struct ExplosionFx {
+    pub timer: Timer,
+    /// Базовая экранная позиция (с учётом Z-слоя), от неё считаем подъём.
+    pub base: Vec3,
+    pub scale_from: f32,
+    pub scale_to: f32,
+    /// Подъём по экрану (px) за всю жизнь — даёт ощущение «вверх».
+    pub rise: f32,
+    pub alpha_from: f32,
+}
+
 /// Компонент на визуальной гранате: связывает сущность с id гранаты на сервере
 #[derive(Component)]
 pub struct GrenadeNet {

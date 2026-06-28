@@ -48,6 +48,17 @@ pub enum Prop {
     Column,
 }
 
+impl Prop {
+    /// Блокирует ли проп ЛИНИЮ ВЗГЛЯДА (LOS). Все пропы блокируют ДВИЖЕНИЕ, но
+    /// низкие — бочки/сундуки — «просвечивают»: за ними видно врага. Высокие —
+    /// колонны — глухие, как стена. Источник правды для серверного куллинга и
+    /// клиентского тумана (одинаково).
+    #[inline]
+    pub fn blocks_vision(self) -> bool {
+        matches!(self, Prop::Column)
+    }
+}
+
 /// Разбор одной клетки карты.
 #[derive(Clone, Copy, Debug)]
 pub struct Cell {
@@ -85,9 +96,13 @@ pub struct ParsedLevel {
     pub origin: Vec2,
     /// Клетки в порядке (y по строкам, x по столбцам) с мировым центром.
     pub cells: Vec<(Vec2, Cell)>,
-    /// AABB стен (min,max) — для коллизии и спатиал-сетки. Включает и пропы
-    /// (они блокируют движение как полноразмерный тайл).
+    /// AABB стен (min,max) — для коллизии ДВИЖЕНИЯ и спатиал-сетки. Включает ВСЕ
+    /// пропы (они блокируют движение как полноразмерный тайл).
     pub wall_aabbs: Vec<(Vec2, Vec2)>,
+    /// AABB препятствий, БЛОКИРУЮЩИХ ВЗГЛЯД (LOS): стены + только «глухие» пропы
+    /// (колонны). Низкие пропы (бочки/сундуки) сюда НЕ входят — за ними видно.
+    /// Используется для серверного куллинга снапшота и клиентского тумана.
+    pub vision_aabbs: Vec<(Vec2, Vec2)>,
     /// Точки спавна (мировые центры клеток 'S').
     pub spawns: Vec<Vec2>,
     /// Декор-пропы: мировой центр клетки + вид пропа (для отрисовки на клиенте).
@@ -139,7 +154,10 @@ pub fn parse<S: AsRef<str>>(lines: &[S], tile: f32) -> ParsedLevel {
         }
     }
 
-    ParsedLevel { width, height, tile, origin, cells, wall_aabbs, spawns, props: Vec::new() }
+    // На этапе разбора карты сплошные клетки — это только стены, поэтому LOS-стены
+    // совпадают с коллизионными. Пропы (и их «глухость») добавит `active_level`.
+    let vision_aabbs = wall_aabbs.clone();
+    ParsedLevel { width, height, tile, origin, cells, wall_aabbs, vision_aabbs, spawns, props: Vec::new() }
 }
 
 // ============================================================================
@@ -399,7 +417,12 @@ pub fn active_level(tile: f32) -> ParsedLevel {
     let half = Vec2::splat(tile * 0.5);
     for (ix, iy, prop) in dungeon_props() {
         let center = lvl.tile_center(ix, iy);
+        // движение блокируют ВСЕ пропы…
         lvl.wall_aabbs.push((center - half, center + half));
+        // …а взгляд — только глухие (колонны). Бочки/сундуки «просвечивают».
+        if prop.blocks_vision() {
+            lvl.vision_aabbs.push((center - half, center + half));
+        }
         lvl.props.push((center, prop));
     }
     lvl

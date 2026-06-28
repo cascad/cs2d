@@ -7,7 +7,7 @@ use protocol::maps::{self, Prop};
 
 use crate::{
     render::{depth_z, layers, world_to_screen, RenderLayer, WorldPos},
-    resources::{SolidTiles, SpawnPoints, WallAabbCache, WallGridRes},
+    resources::{SolidTiles, SpawnPoints, VisionGridRes, WallAabbCache, WallGridRes},
     systems::iso::{variant_index, TILE_ANCHOR_Y},
     systems::level::Wall,
 };
@@ -68,7 +68,7 @@ fn prop_image(prop: Prop) -> &'static str {
 pub fn create_fixed_level(
     commands: &mut Commands,
     asset_server: &AssetServer,
-) -> (SolidTiles, Vec<Vec2>, Vec<(Vec2, Vec2)>) {
+) -> (SolidTiles, Vec<Vec2>, Vec<(Vec2, Vec2)>, Vec<(Vec2, Vec2)>) {
     let lvl = maps::active_level(TILE);
     let (w, h) = (lvl.width, lvl.height);
     let mut env = EnvLoader::new(asset_server);
@@ -132,6 +132,7 @@ pub fn create_fixed_level(
                 GlobalTransform::default(),
                 WorldPos(*center),
                 RenderLayer(layer),
+                crate::systems::fog::FogTint::new(tint, *center),
                 Wall,
             ));
         }
@@ -155,20 +156,25 @@ pub fn create_fixed_level(
             GlobalTransform::default(),
             WorldPos(*center),
             RenderLayer(layers::ACTOR),
+            crate::systems::fog::FogTint::new(tint, *center),
         ));
     }
 
-    (SolidTiles(lvl.solid_tiles()), lvl.spawns, lvl.wall_aabbs)
+    (SolidTiles(lvl.solid_tiles()), lvl.spawns, lvl.wall_aabbs, lvl.vision_aabbs)
 }
 
 /// Системный сетап: один раз строим уровень и кладём ресурсы. Спатиал-сетка
 /// стен (`WallGrid`) и кэш AABB строятся СРАЗУ из мировых данных.
 pub fn setup_fixed_level(mut commands: Commands, asset_server: Res<AssetServer>) {
-    let (solid, spawns, wall_aabbs) = create_fixed_level(&mut commands, &asset_server);
+    let (solid, spawns, wall_aabbs, vision_aabbs) =
+        create_fixed_level(&mut commands, &asset_server);
 
+    // Сетка движения — все стены/пропы; сетка взгляда (туман) — без низких пропов.
     let grid = WallGrid::build(&wall_aabbs, TILE_SIZE * 2.0);
+    let vision_grid = WallGrid::build(&vision_aabbs, TILE_SIZE * 2.0);
     commands.insert_resource(solid);
     commands.insert_resource(SpawnPoints(spawns));
     commands.insert_resource(WallGridRes(grid));
+    commands.insert_resource(VisionGridRes(vision_grid));
     commands.insert_resource(WallAabbCache(wall_aabbs));
 }

@@ -63,9 +63,9 @@ fn main() {
         .insert_resource(SpawnedClients::default())
         .insert_resource(LastGrenadeThrows::default())
         .insert_resource(GrenadeSyncTimer(Timer::from_seconds(
-            0.1,
+            TICK_DT,
             TimerMode::Repeating,
-        ))) // 10 Гц
+        ))) // как у снапшота игрока (~64 Гц): плавный полёт и точность при отскоках
         .insert_resource(Npcs::default())
         .insert_resource(NpcIdCounter::default())
         .insert_resource(NpcRoutes::default())

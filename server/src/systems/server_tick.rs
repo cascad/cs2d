@@ -2,14 +2,14 @@ use bevy::prelude::*;
 use bevy_quinnet::server::QuinnetServer;
 use protocol::{
     combat::in_fov,
-    constants::{CH_S2C, MELEE_CD_GRACE, MELEE_HIT_DELAY, PLAYER_SIZE, TICK_DT, VIEW_FOV_HALF_ANGLE, VIEW_RADIUS},
+    constants::{CH_S2C, MELEE_CD_GRACE, MELEE_HIT_DELAY, NEAR_SIGHT_RADIUS, PLAYER_SIZE, TICK_DT, VIEW_FOV_HALF_ANGLE, VIEW_RADIUS},
     messages::{NpcSnapshot, PlayerSnapshot, WorldSnapshot, S2C},
 };
 use protocol::abilities::{tick_abilities, AbilityConfig, AbilityInput};
 use protocol::messages::InputState;
 use std::collections::HashMap;
 use crate::{
-    resources::{AppliedSeqs, NpcMode, Npcs, PendingInputs, PendingMelee, PendingMelees, PlayerStates, Reveals, ServerTickTimer, SnapshotHistory, WallGridRes}, utils::push_history
+    resources::{AppliedSeqs, NpcMode, Npcs, PendingInputs, PendingMelee, PendingMelees, PlayerStates, Reveals, ServerTickTimer, SnapshotHistory, VisionGridRes, WallGridRes}, utils::push_history
 };
 
 /// Эффективный ввод тика: свежий пакет (его запоминаем в `last`), иначе
@@ -48,6 +48,7 @@ pub fn server_tick(
     mut history: ResMut<SnapshotHistory>,
     mut server: ResMut<QuinnetServer>,
     walls: Res<WallGridRes>, // AABB-стены для точной круговой коллизии движения
+    vision: Res<VisionGridRes>, // стены+колонны для LOS-куллинга (без низких пропов)
     npcs: Res<Npcs>,
     reveals: Res<Reveals>,
     mut pending_melees: ResMut<PendingMelees>,
@@ -258,15 +259,24 @@ pub fn server_tick(
             Some(vst) => {
                 let vpos = vst.pos;
                 let vaim = vst.aim; // поле зрения вокруг КУРСОРА (а не довёрнутой модели)
+                let near2 = NEAR_SIGHT_RADIUS * NEAR_SIGHT_RADIUS;
                 let visible = |target: Vec2| -> bool {
-                    if (target - vpos).length_squared() > r2 {
+                    let d2 = (target - vpos).length_squared();
+                    if d2 > r2 {
                         return false; // за пределами радиуса
                     }
-                    // поле зрения: нельзя видеть за спиной (анти-чит)
-                    if !in_fov(vpos, vaim, target, VIEW_FOV_HALF_ANGLE) {
+                    // глухое препятствие на линии (стена/колонна) — не видно никогда.
+                    // Бочки/сундуки в vision-сетку НЕ входят → за ними видно.
+                    if vision.0.segment_blocked(vpos, target, 0.001) {
                         return false;
                     }
-                    !walls.0.segment_blocked(vpos, target, 0.001) // стена на линии?
+                    // ближний радиус «чутья»: вплотную (даже за спиной) — видно
+                    // всегда, лишь бы не было глухой стены на линии (проверено выше).
+                    if d2 <= near2 {
+                        return true;
+                    }
+                    // дальше — только в конусе зрения (нельзя видеть за спиной).
+                    in_fov(vpos, vaim, target, VIEW_FOV_HALF_ANGLE)
                 };
                 // подсвеченные атакующие (вне поля зрения, но недавно били) —
                 // их шлём жертве в обход FOV-куллинга.
