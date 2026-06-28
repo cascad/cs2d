@@ -111,6 +111,11 @@ pub struct CircleTex(pub Handle<Image>);
 #[derive(Resource, Clone)]
 pub struct RingTex(pub Handle<Image>);
 
+/// Сгенерированная стилизованная стрелка-дартик — указатель направления тела
+/// (заменяет прежний топорный белый квадрат). Тонируется через `Sprite.color`.
+#[derive(Resource, Clone)]
+pub struct ArrowTex(pub Handle<Image>);
+
 #[derive(Resource, Default)]
 pub struct HpUiMap(pub HashMap<u64, Entity>);
 
@@ -155,6 +160,9 @@ pub struct LocalStatus {
     pub stamina: f32,
     pub blocking: bool,
     pub hp: i32,
+    /// Остаток оглушения локального игрока (сек) из снапшота — для панели эффектов
+    /// слева (иконка стана + полоска отката под ней).
+    pub stun_left: f32,
 }
 
 impl Default for LocalStatus {
@@ -163,6 +171,7 @@ impl Default for LocalStatus {
             stamina: protocol::constants::STAMINA_MAX,
             blocking: false,
             hp: protocol::constants::PLAYER_MAX_HP,
+            stun_left: 0.0,
         }
     }
 }

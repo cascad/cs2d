@@ -138,11 +138,20 @@ pub fn create_fixed_level(
         }
     }
 
-    // --- пропы: бочки/сундуки/колонны. Рисуем В СЛОЕ АКТЁРОВ с y-сортировкой,
-    // чтобы игрок корректно перекрывался/перекрывал предмет по глубине (за
-    // колонной — скрыт, перед ней — поверх). Коллизия уже в lvl.wall_aabbs. ---
+    // --- пропы: бочки/сундуки/колонны. Слой зависит от того, ПРОСВЕЧИВАЕТ ли проп
+    // (тот же признак, что и для тумана — `blocks_vision`):
+    //  • глухие (колонны) — в слое АКТЁРОВ с y-сортировкой: живой/труп корректно
+    //    перекрываются по глубине, а ТЕЛО остаётся ЗА колонной (она выше трупов);
+    //  • просвечивающие (бочки/сундуки) — в отдельном НИЗКОМ слое под трупами,
+    //    чтобы лежащее тело рисовалось ПОВЕРХ них (их низкий силуэт не должен
+    //    прятать труп). Коллизия одинаковая (она в lvl.wall_aabbs). ---
     let prop_size = Vec2::new(TILE * 2.0, TILE * 4.0);
     for (center, prop) in &lvl.props {
+        let layer = if prop.blocks_vision() {
+            layers::ACTOR
+        } else {
+            layers::PROP_SEETHROUGH
+        };
         let s = world_to_screen(*center);
         commands.spawn((
             Sprite {
@@ -152,10 +161,10 @@ pub fn create_fixed_level(
                 ..default()
             },
             anchor,
-            Transform::from_xyz(s.x, s.y, depth_z(*center, layers::ACTOR)),
+            Transform::from_xyz(s.x, s.y, depth_z(*center, layer)),
             GlobalTransform::default(),
             WorldPos(*center),
-            RenderLayer(layers::ACTOR),
+            RenderLayer(layer),
             crate::systems::fog::FogTint::new(tint, *center),
         ));
     }

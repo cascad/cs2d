@@ -12,6 +12,8 @@ bevy = { version = "0.18" , features = [
     "bevy_asset",
     "bevy_sprite", 
     "bevy_render",
+    "bevy_audio",   # звук (SFX + фоновая музыка)
+    "vorbis",       # декодер OGG — в этот формат сконвертированы все наши клипы
     "png", "x11",
     ]}
 

@@ -20,6 +20,17 @@ pub struct MeleeFxCtx<'w, 's> {
     pub commands: Commands<'w, 's>,
     pub meshes: ResMut<'w, Assets<Mesh>>,
     pub materials: ResMut<'w, Assets<ColorMaterial>>,
+    /// Звук собственных боевых действий (взмах/стан/перекат). Пишем с позицией
+    /// локального игрока — в `audio.rs` это даёт полную громкость.
+    pub ev_combat_sfx: MessageWriter<'w, crate::events::CombatSfxEvent>,
+}
+
+/// Залипание разовых нажатий между тиками отправки (рывок/удар/удар щитом).
+#[derive(Default)]
+pub struct InputLatches {
+    pub dash: bool,
+    pub attack: bool,
+    pub stun: bool,
 }
 
 /// Предсказание движения локального игрока в ЛОКСТЕПЕ с отправкой ввода:
@@ -45,15 +56,14 @@ pub fn send_input_and_predict(
     // commands+meshes+materials упакованы в один SystemParam, чтобы не упереться
     // в лимит Bevy на 16 аргументов системы
     mut fx: MeleeFxCtx,
-    // накапливаем нажатие рывка между тиками, чтобы не потерять его,
-    // если Space нажали не в кадр отправки
-    mut dash_latch: Local<bool>,
-    // то же для удара: ЛКМ могли кликнуть не в кадр отправки
-    mut attack_latch: Local<bool>,
+    // накапливаем РАЗОВЫЕ нажатия (рывок/удар/удар щитом) между тиками, чтобы не
+    // потерять их, если клавишу нажали не в кадр отправки. Один Local-структ, а не
+    // три отдельных — иначе система упирается в лимит Bevy на 16 аргументов.
+    mut latch: Local<InputLatches>,
 ) {
-    let dash_now = keys.just_pressed(KeyCode::Space);
-    *dash_latch |= dash_now;
-    *attack_latch |= mouse.just_pressed(MouseButton::Left);
+    latch.dash |= keys.just_pressed(KeyCode::Space);
+    latch.attack |= mouse.just_pressed(MouseButton::Left);
+    latch.stun |= keys.just_pressed(KeyCode::KeyQ);
 
     // шагаем симуляцию строго раз в тик
     if !timer.0.tick(time.delta()).just_finished() {
@@ -92,7 +102,9 @@ pub fn send_input_and_predict(
     let want_block = mouse.pressed(MouseButton::Right);
     // удар — ЛКМ (удержание = серия ударов по готовности КД) или одиночный клик,
     // пойманный латчем между тиками
-    let want_attack = *attack_latch || mouse.pressed(MouseButton::Left);
+    let want_attack = latch.attack || mouse.pressed(MouseButton::Left);
+    // удар щитом — разовое нажатие Q (как рывок), пойманное латчем между тиками
+    let want_stun = latch.stun;
 
     let cfg = AbilityConfig::default();
     let out = tick_abilities(
@@ -100,9 +112,10 @@ pub fn send_input_and_predict(
         &AbilityInput {
             move_dir: dir,
             aim: aim_angle,
-            want_dash: *dash_latch,
+            want_dash: latch.dash,
             want_block,
             want_attack,
+            want_stun,
         },
         TICK_DT,
         &cfg,
@@ -127,6 +140,10 @@ pub fn send_input_and_predict(
             facing
         };
         anim.start_action_facing(AnimState::Dash, ang);
+        fx.ev_combat_sfx.write(crate::events::CombatSfxEvent {
+            kind: crate::events::CombatSfxKind::Dash,
+            pos: predicted.pos,
+        });
     }
 
     // Собственный взмах предсказываем локально (отзывчивость): анимация + декаль
@@ -142,6 +159,20 @@ pub fn send_input_and_predict(
             predicted.pos,
             out.attack_dir,
         );
+        fx.ev_combat_sfx.write(crate::events::CombatSfxEvent {
+            kind: crate::events::CombatSfxKind::Swing,
+            pos: predicted.pos,
+        });
+    }
+
+    // Удар щитом (stun) предсказываем локально: анимация Kick. Урон/оглушение
+    // считает сервер, его StunFx с нашим id клиент игнорирует (без дублирования).
+    if out.did_stun {
+        anim.start_action(AnimState::Kick);
+        fx.ev_combat_sfx.write(crate::events::CombatSfxEvent {
+            kind: crate::events::CombatSfxKind::StunBash,
+            pos: predicted.pos,
+        });
     }
 
     // Мировая скорость этого тика — её отрисовка интегрирует КАЖДЫЙ КАДР
@@ -165,8 +196,13 @@ pub fn send_input_and_predict(
         stance: stance.0.clone(),
         timestamp: time_in_seconds(),
         block: want_block,
-        dash: *dash_latch,
+        // шлём РЕШЁННОЕ событие рывка (как attack/stun), а не сырое нажатие: сервер
+        // выполнит рывок ТОЛЬКО когда клиент его реально предсказал (и проиграл
+        // анимацию переката). Иначе сервер по сырому намерению дёргал бы игрока без
+        // анимации, когда таймеры КД на ±1 тик расходятся.
+        dash: out.did_dash,
         attack: out.did_attack,
+        stun: out.did_stun,
     };
     client
         .connection_mut()
@@ -176,8 +212,7 @@ pub fn send_input_and_predict(
     if pending.0.len() > 256 {
         pending.0.pop_front();
     }
-    *dash_latch = false;
-    *attack_latch = false;
+    *latch = InputLatches::default();
 }
 
 /// Плавно ведёт ОТРИСОВКУ локального игрока методом dead-reckoning: каждый кадр

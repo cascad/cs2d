@@ -11,7 +11,8 @@ use crate::menu::ConnectTimeout;
 use crate::resources::grenades::{GrenadeStates, NetState};
 use crate::resources::{
     ClientLatency, DeadPlayers, HpUiMap, LastKnownPos, LastSeen, LocalAbilities, LocalStatus,
-    MyPlayer, PendingInputsClient, PredictedPos, RingTex, SnapshotBuffer, SpawnedPlayers, TimeSync,
+    ArrowTex, MyPlayer, PendingInputsClient, PredictedPos, RingTex, SnapshotBuffer, SpawnedPlayers,
+    TimeSync,
     WallGridRes,
 };
 use crate::systems::iso::{ISO_ACTOR_PX, KNIGHT_ANCHOR_Y};
@@ -41,6 +42,7 @@ pub struct NetCtx<'w, 's> {
     pub q_marker: Query<'w, 's, (Entity, &'static PlayerMarker)>,
 
     pub ring_tex: Res<'w, RingTex>,
+    pub arrow_tex: Res<'w, ArrowTex>,
     pub knight: Res<'w, crate::systems::iso::KnightAnims>,
 
     // события
@@ -49,6 +51,9 @@ pub struct NetCtx<'w, 's> {
     pub ev_left: MessageWriter<'w, PlayerLeftEvent>,
     pub ev_grenade_spawn: MessageWriter<'w, GrenadeSpawnEvent>,
     pub ev_grenade_detonated: MessageWriter<'w, GrenadeDetonatedEvent>,
+    pub ev_npc_died: MessageWriter<'w, crate::events::NpcDiedEvent>,
+    pub ev_npc_sound: MessageWriter<'w, crate::events::NpcSoundEvent>,
+    pub ev_combat_sfx: MessageWriter<'w, crate::events::CombatSfxEvent>,
 
     // прочее
     pub grenade_states: ResMut<'w, GrenadeStates>,
@@ -132,6 +137,7 @@ pub fn receive_server_messages(mut client: ResMut<QuinnetClient>, mut net: NetCt
                         net.status.stamina = ps.stamina;
                         net.status.blocking = ps.blocking;
                         net.status.hp = ps.hp;
+                        net.status.stun_left = ps.stun_left;
 
                         while let Some(front) = net.pending.0.front() {
                             if front.seq <= *ack {
@@ -150,6 +156,13 @@ pub fn receive_server_messages(mut client: ResMut<QuinnetClient>, mut net: NetCt
                             stamina: ps.stamina,
                             facing: ps.rotation,
                             melee_cd_left: ps.melee_cd_left,
+                            // КД рывка авторитетно: сидируем, чтобы решение did_dash
+                            // при реплее совпадало с сервером (иначе сервер выполняет
+                            // рывок, который клиент не предсказал → движение без анимации)
+                            dash_cd_left: ps.dash_cd_left,
+                            // оглушение авторитетно: сидируем, чтобы реплей вводов
+                            // замирал ровно как на сервере (предсказание не «уезжает»)
+                            stun_left: ps.stun_left,
                             ..Default::default()
                         };
                         let mut pos = Vec2::new(ps.x, ps.y);
@@ -162,14 +175,16 @@ pub fn receive_server_messages(mut client: ResMut<QuinnetClient>, mut net: NetCt
                         net.predicted.pos = pos;
                         net.predicted.valid = true;
 
-                        // Реконсилим КД удара (и стамину/заморозку) в ЖИВОЕ
+                        // Реконсилим КД удара/рывка (и стамину/заморозку) в ЖИВОЕ
                         // предсказание: дальше send_input продолжает счёт ровно с
-                        // авторитетного значения → клиент и сервер не расходятся.
-                        // Рывок НЕ трогаем (он предсказывается клиентом и приходит
-                        // событием DashFx — снапшот его КД не несёт).
+                        // авторитетного значения → клиент и сервер не расходятся, и
+                        // предсказание рывка (did_dash → анимация переката) совпадает
+                        // с тем, что выполнит сервер.
                         net.abilities.0.melee_cd_left = ab.melee_cd_left;
+                        net.abilities.0.dash_cd_left = ab.dash_cd_left;
                         net.abilities.0.attack_lock_left = ab.attack_lock_left;
                         net.abilities.0.stamina = ab.stamina;
+                        net.abilities.0.stun_left = ab.stun_left;
                     }
                 }
 
@@ -197,6 +212,7 @@ pub fn receive_server_messages(mut client: ResMut<QuinnetClient>, mut net: NetCt
                             net.knight.idle.clone(),
                             net.knight.layout.clone(),
                             net.ring_tex.0.clone(),
+                            net.arrow_tex.0.clone(),
                         );
                     }
 
@@ -214,12 +230,20 @@ pub fn receive_server_messages(mut client: ResMut<QuinnetClient>, mut net: NetCt
                 // (`blocking`), иначе её видел только сам блокирующий. Локального
                 // не трогаем: ему блок ставит предсказание (send_input).
                 for p in &snap.players {
-                    if p.id == net.my.id || net.dead.0.contains(&p.id) {
+                    if net.dead.0.contains(&p.id) {
                         continue;
                     }
+                    let is_me = p.id == net.my.id;
                     for (marker, mut anim) in net.q_anim.iter_mut() {
                         if marker.0 == p.id {
-                            anim.blocking = p.blocking;
+                            // позу блока локального игрока ставит предсказание;
+                            // удалённым — из снапшота. Оглушение авторитетно для
+                            // ВСЕХ (в т.ч. себя): по нему модель замирает и горят
+                            // звёздочки.
+                            if !is_me {
+                                anim.blocking = p.blocking;
+                            }
+                            anim.stun_left = p.stun_left;
                             break;
                         }
                     }
@@ -283,6 +307,7 @@ pub fn receive_server_messages(mut client: ResMut<QuinnetClient>, mut net: NetCt
                     net.knight.idle.clone(),
                     net.knight.layout.clone(),
                     net.ring_tex.0.clone(),
+                    net.arrow_tex.0.clone(),
                 );
                 net.spawned.0.insert(id);
 
@@ -404,6 +429,34 @@ pub fn receive_server_messages(mut client: ResMut<QuinnetClient>, mut net: NetCt
                         from,
                         dir,
                     );
+                    // звук взмаха чужого игрока (затухнет по дистанции)
+                    net.ev_combat_sfx.write(crate::events::CombatSfxEvent {
+                        kind: crate::events::CombatSfxKind::Swing,
+                        pos: from,
+                    });
+                }
+            }
+
+            // ===================================================
+            // 7.6) УДАР ЩИТОМ (stun) — визуал (анимация Kick)
+            // ===================================================
+            S2C::StunFx {
+                attacker_id,
+                from,
+                dir: _,
+            } => {
+                // Свой удар щитом уже отыгран предсказанием (did_stun в send_input),
+                // поэтому FX с нашим id игнорируем. Для остальных — играем Kick.
+                if attacker_id != net.my.id {
+                    for (marker, mut anim) in net.q_anim.iter_mut() {
+                        if marker.0 == attacker_id {
+                            anim.start_action(crate::components::AnimState::Kick);
+                        }
+                    }
+                    net.ev_combat_sfx.write(crate::events::CombatSfxEvent {
+                        kind: crate::events::CombatSfxKind::StunBash,
+                        pos: from,
+                    });
                 }
             }
 
@@ -422,6 +475,18 @@ pub fn receive_server_messages(mut client: ResMut<QuinnetClient>, mut net: NetCt
                         if marker.0 == player_id {
                             anim.start_action_facing(crate::components::AnimState::Dash, ang);
                         }
+                    }
+                    // звук переката чужого игрока: позицию берём из последнего
+                    // известного снапшота (DashFx сам её не несёт).
+                    if let Some(pos) = net
+                        .last_pos
+                        .as_ref()
+                        .and_then(|m| m.0.get(&player_id).map(|(p, _)| *p))
+                    {
+                        net.ev_combat_sfx.write(crate::events::CombatSfxEvent {
+                            kind: crate::events::CombatSfxKind::Dash,
+                            pos,
+                        });
                     }
                 }
             }
@@ -484,6 +549,8 @@ pub fn receive_server_messages(mut client: ResMut<QuinnetClient>, mut net: NetCt
             // 9) СМЕРТЬ НЕПИСЯ (скелета) → труп
             // ===================================================
             S2C::NpcDied { id, x, y, facing, kind } => {
+                net.ev_npc_died
+                    .write(crate::events::NpcDiedEvent { pos: Vec2::new(x, y) });
                 if let Some((ent, _)) = net.q_npc.iter().find(|(_, m)| m.0 == id) {
                     net.commands.entity(ent).despawn();
                 }
@@ -498,6 +565,16 @@ pub fn receive_server_messages(mut client: ResMut<QuinnetClient>, mut net: NetCt
                     );
                     net.corpses.register(&mut net.commands, corpse_ent);
                 }
+            }
+
+            // ===================================================
+            // 10) ПОЗИЦИОННЫЙ ЗВУК НЕПИСИ (рык/атака) — слышно за стеной
+            // ===================================================
+            S2C::NpcSound { kind, x, y } => {
+                net.ev_npc_sound.write(crate::events::NpcSoundEvent {
+                    kind,
+                    pos: Vec2::new(x, y),
+                });
             }
         }
     }
@@ -540,6 +617,7 @@ fn step_pos(
             want_dash: inp.dash,
             want_block: inp.block,
             want_attack: inp.attack,
+            want_stun: inp.stun,
         },
         TICK_DT,
         cfg,
@@ -548,25 +626,31 @@ fn step_pos(
     walls.slide_circle(pos, delta, PLAYER_SIZE * 0.5)
 }
 
-/// Локальная (в системе координат спрайта игрока = экранной) позиция засечки на
-/// ободке-эллипсе для мирового угла `facing`. Точка наземного круга радиуса `RW`
-/// под углом `facing` проецируется в изо — так засечка ложится ровно на обод.
-fn notch_local(facing: f32) -> Vec3 {
+/// Локальный (в координатах спрайта игрока = экранных) трансформ стрелки-указателя
+/// для мирового угла `facing`: позиция чуть за ободком-эллипсом + поворот спрайта
+/// так, чтобы остриё смотрело наружу по направлению взгляда (в ИЗО-проекции).
+fn dir_arrow_transform(facing: f32) -> Transform {
     use crate::render::world_to_screen;
     // полуось эллипса по X = ISO_ACTOR_PX*0.21 (= RW*√2) ⇒ RW = .../√2
     let rw = ISO_ACTOR_PX * 0.21 / std::f32::consts::SQRT_2;
+    // экранный вектор направления (изо); чуть выносим остриё за обод (×1.18)
     let s = world_to_screen(Vec2::new(facing.cos(), facing.sin())) * rw;
-    Vec3::new(s.x, s.y, -0.45) // чуть выше кольца (-0.5), но под телом
+    let angle = s.y.atan2(s.x); // текстура стрелки смотрит в +X → доворачиваем
+    Transform {
+        translation: Vec3::new(s.x * 1.18, s.y * 1.18, -0.45), // выше кольца (-0.5), под телом
+        rotation: Quat::from_rotation_z(angle),
+        ..default()
+    }
 }
 
-/// Каждый кадр двигает засечку по ободку в направлении взгляда игрока (`Facing`).
+/// Каждый кадр ведёт стрелку-указатель по ободку в направлении взгляда (`Facing`).
 pub fn update_dir_notch(
     q_face: Query<&crate::components::Facing>,
     mut q_notch: Query<(&ChildOf, &mut Transform), With<crate::components::DirNotch>>,
 ) {
     for (parent, mut tf) in q_notch.iter_mut() {
         if let Ok(facing) = q_face.get(parent.parent()) {
-            tf.translation = notch_local(facing.0);
+            *tf = dir_arrow_transform(facing.0);
         }
     }
 }
@@ -585,6 +669,7 @@ fn spawn_player(
     sheet: Handle<Image>,
     layout: Handle<TextureAtlasLayout>,
     ring: Handle<Image>,
+    arrow: Handle<Image>,
 ) -> Entity {
     use crate::systems::iso::{knight_row, KNIGHT_COLS};
     let world = Vec2::new(x, y);
@@ -641,14 +726,16 @@ fn spawn_player(
                 },
                 Transform::from_xyz(0.0, 0.0, -0.5),
             ));
-            // Засечка направления на ободке (куда смотрит/целится модель).
+            // Стилизованная стрелка-указатель направления тела (куда смотрит/
+            // целится модель): остриё наружу по `Facing`, цвет — как у кольца.
             p.spawn((
                 Sprite {
-                    color: Color::srgb(1.0, 1.0, 1.0),
-                    custom_size: Some(Vec2::splat(ISO_ACTOR_PX * 0.10)),
+                    image: arrow,
+                    color: ring_color,
+                    custom_size: Some(Vec2::splat(ISO_ACTOR_PX * 0.22)),
                     ..default()
                 },
-                Transform::from_translation(notch_local(rot)),
+                dir_arrow_transform(rot),
                 crate::components::DirNotch,
             ));
         })

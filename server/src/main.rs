@@ -73,7 +73,9 @@ fn main() {
         .insert_resource(NpcRoutes::default())
         .insert_resource(NpcSpawnPoints::default())
         .insert_resource(NpcRespawnTimer::default())
+        .insert_resource(NpcGrowlSched::default())
         .insert_resource(PendingMelees::default())
+        .insert_resource(PendingStuns::default())
         .insert_resource(Reveals::default())
         .add_plugins((
             // Ограничиваем главный цикл частотой тика (64 Гц).
@@ -105,7 +107,9 @@ fn main() {
                 drop_inactive,        // 1. вырубаем «молчунов»
                 process_c2s_messages, // 2. обрабатываем входы (+ Heartbeat/Goodbye)
                 resolve_melees,       // 2.4 урон ближнего боя в середине взмаха
+                resolve_stuns,        // 2.45 наложение стана (удар щитом) в середине Kick
                 npc_ai,               // 2.5 ИИ скелетов (до снапшота)
+                npc_audio_growls,     // 2.6 амбиентные рыки (позиционный звук за стеной)
                 server_tick,          // 3. рассылаем снапшот
                 process_client_connected,
                 process_client_disconnected,

@@ -1,5 +1,5 @@
 use crate::{
-    components::LocalPlayer,
+    components::{ActorAnim, AnimState, LocalPlayer},
     render::{depth_z, layers, pointer_world, world_to_screen, WorldPos},
     resources::{MyPlayer, grenades::GrenadeCooldown},
     systems::{melee::make_iso_ring_mesh, utils::time_in_seconds},
@@ -70,6 +70,7 @@ pub fn grenade_throw(
     windows: Query<&Window>,
     camera_q: Query<(&Camera, &GlobalTransform)>,
     mut grenade_cd: ResMut<GrenadeCooldown>,
+    mut anim_q: Query<&mut ActorAnim, With<LocalPlayer>>,
     time: Res<Time>,
 ) {
     grenade_cd.0.tick(time.delta());
@@ -127,6 +128,10 @@ pub fn grenade_throw(
         .is_ok()
     {
         grenade_cd.0.reset();
+        // анимация замаха зельем (CastSpell) — чисто визуально, на отзывчивость
+        if let Ok(mut anim) = anim_q.single_mut() {
+            anim.start_action(AnimState::Cast);
+        }
         info!(
             "💣 Sent ThrowGrenade {}, speed: {}, timer: {}",
             ev.id, ev.speed, ev.timer

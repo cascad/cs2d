@@ -2,14 +2,14 @@ use bevy::prelude::*;
 use bevy_quinnet::server::QuinnetServer;
 use protocol::{
     combat::in_fov,
-    constants::{CH_S2C, MELEE_CD_GRACE, MELEE_HIT_DELAY, NEAR_SIGHT_RADIUS, PLAYER_SIZE, TICK_DT, VIEW_FOV_HALF_ANGLE, VIEW_RADIUS},
+    constants::{CH_S2C, DASH_CD_GRACE, MELEE_CD_GRACE, MELEE_HIT_DELAY, NEAR_SIGHT_RADIUS, PLAYER_SIZE, STUN_CD_GRACE, STUN_HIT_DELAY, TICK_DT, VIEW_FOV_HALF_ANGLE, VIEW_RADIUS},
     messages::{NpcSnapshot, PlayerSnapshot, WorldSnapshot, S2C},
 };
 use protocol::abilities::{tick_abilities, AbilityConfig, AbilityInput};
 use protocol::messages::InputState;
 use std::collections::HashMap;
 use crate::{
-    resources::{AppliedSeqs, NpcMode, Npcs, PendingInputs, PendingMelee, PendingMelees, PlayerStates, Reveals, ServerTickTimer, SnapshotHistory, VisionGridRes, WallGridRes}, utils::push_history
+    resources::{AppliedSeqs, NpcMode, Npcs, PendingInputs, PendingMelee, PendingMelees, PendingStun, PendingStuns, PlayerStates, Reveals, ServerTickTimer, SnapshotHistory, VisionGridRes, WallGridRes}, utils::push_history
 };
 
 /// Эффективный ввод тика: свежий пакет (его запоминаем в `last`), иначе
@@ -30,9 +30,10 @@ pub fn effective_input(
         }
         None => last.clone().map(|mut i| {
             // на «пустом» тике (пакет не пришёл) НЕ повторяем разовые события —
-            // иначе из удержания получился бы автоповтор удара/рывка.
+            // иначе из удержания получился бы автоповтор удара/рывка/щита.
             i.dash = false;
             i.attack = false;
+            i.stun = false;
             i
         }),
     }
@@ -52,6 +53,7 @@ pub fn server_tick(
     npcs: Res<Npcs>,
     reveals: Res<Reveals>,
     mut pending_melees: ResMut<PendingMelees>,
+    mut pending_stuns: ResMut<PendingStuns>,
 ) {
     if !timer.0.tick(time.delta()).just_finished() {
         return;
@@ -79,6 +81,8 @@ pub fn server_tick(
     // клиента и сервера, чтобы предсказанный честным клиентом взмах всегда бил.
     let cfg = AbilityConfig {
         melee_grace: MELEE_CD_GRACE,
+        stun_grace: STUN_CD_GRACE,
+        dash_grace: DASH_CD_GRACE,
         ..AbilityConfig::default()
     };
     let half = PLAYER_SIZE * 0.5;
@@ -90,6 +94,9 @@ pub fn server_tick(
     // (резолв в середине взмаха). Удар теперь — часть детерминированного тика
     // способностей (как рывок), поэтому клиент-предсказание и сервер совпадают.
     let mut melee_events: Vec<(u64, Vec2, Vec2)> = Vec::new();
+    // Удары щитом (stun) этого тика: рассылаем FX (анимация Kick) и планируем
+    // наложение оглушения (резолв в середине замаха, как у melee).
+    let mut stun_events: Vec<(u64, Vec2, Vec2)> = Vec::new();
 
     // Тикаем способности и движение ВСЕХ живых игроков (стамина/кулдауны идут
     // даже без ввода — иначе регенерация бы зависала).
@@ -103,7 +110,7 @@ pub fn server_tick(
         let input = input_owned.as_ref();
 
         let mut wish = Vec2::ZERO;
-        let (mut want_block, mut want_dash, mut want_attack) = (false, false, false);
+        let (mut want_block, mut want_dash, mut want_attack, mut want_stun) = (false, false, false, false);
         // по умолчанию (нет ввода) целимся в текущий угол → разворота не будет
         let mut aim = st.rot;
         if let Some(inp) = input {
@@ -114,6 +121,7 @@ pub fn server_tick(
             want_block = inp.block;
             want_dash = inp.dash;
             want_attack = inp.attack;
+            want_stun = inp.stun;
             aim = inp.rotation; // ЖЕЛАЕМЫЙ угол; модель довернётся плавно
             st.stance = inp.stance.clone();
         }
@@ -128,6 +136,7 @@ pub fn server_tick(
                 want_dash,
                 want_block,
                 want_attack,
+                want_stun,
             },
             TICK_DT,
             &cfg,
@@ -140,6 +149,9 @@ pub fn server_tick(
         }
         if out.did_attack {
             melee_events.push((_id, st.pos, out.attack_dir));
+        }
+        if out.did_stun {
+            stun_events.push((_id, st.pos, out.stun_dir));
         }
 
         let delta = out.move_dir * out.speed * TICK_DT;
@@ -211,6 +223,32 @@ pub fn server_tick(
         }
     }
 
+    // Удары щитом этого тика: планируем наложение стана (резолв в середине Kick)
+    // и рассылаем FX (анимация удара щитом у атакующего, вкл. него самого).
+    if !stun_events.is_empty() {
+        for (pid, from, dir) in &stun_events {
+            pending_stuns.0.push(PendingStun {
+                attacker: *pid,
+                from: *from,
+                dir: *dir,
+                resolve_at: now + STUN_HIT_DELAY,
+            });
+        }
+        let endpoint = server.endpoint_mut();
+        for (pid, from, dir) in stun_events {
+            endpoint
+                .broadcast_message_on(
+                    CH_S2C,
+                    S2C::StunFx {
+                        attacker_id: pid,
+                        from,
+                        dir,
+                    },
+                )
+                .ok();
+        }
+    }
+
     let server_time = time.elapsed_secs_f64();
 
     // Полный набор снапшотов всех игроков считаем один раз.
@@ -227,6 +265,8 @@ pub fn server_tick(
             stamina: st.abilities.stamina,
             blocking: st.blocking,
             melee_cd_left: st.abilities.melee_cd_left,
+            dash_cd_left: st.abilities.dash_cd_left,
+            stun_left: st.abilities.stun_left,
         })
         .collect();
 
@@ -248,6 +288,7 @@ pub fn server_tick(
             aggro: n.mode == NpcMode::Chase,
             kind: n.kind,
             attacking: n.attack_anim > 0.0,
+            stun_left: n.stun_left,
         })
         .collect();
 
@@ -358,6 +399,7 @@ mod tests {
             block,
             dash,
             attack: false,
+            stun: false,
         }
     }
 

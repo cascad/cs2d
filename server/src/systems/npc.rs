@@ -7,11 +7,11 @@ use bevy_quinnet::server::QuinnetServer;
 use protocol::{
     constants::{
         CH_S2C, NPC_ATTACK_ANIM, NPC_ATTACK_COOLDOWN, NPC_ATTACK_DAMAGE, NPC_ATTACK_RANGE,
-        NPC_CHASE_SPEED, NPC_GIVEUP_TIME, NPC_HP, NPC_RADIUS, NPC_SIGHT_RADIUS, NPC_SPEED,
-        PLAYER_SIZE,
+        NPC_AUDIO_RADIUS, NPC_CHASE_SPEED, NPC_GIVEUP_TIME, NPC_GROWL_INTERVAL, NPC_HP, NPC_RADIUS,
+        NPC_SIGHT_RADIUS, NPC_SPEED, PLAYER_SIZE,
     },
     maps,
-    messages::{NpcKind, S2C},
+    messages::{NpcKind, NpcSoundKind, S2C},
 };
 
 use crate::{
@@ -22,7 +22,7 @@ use crate::{
     },
     systems::level_fixed::TILE,
 };
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 /// Желаемая популяция скелетов на карте (поддерживается автоспавном).
 const NPC_TARGET_POP: usize = 5;
@@ -80,6 +80,7 @@ fn spawn_npc(npcs: &mut Npcs, id_counter: &mut NpcIdCounter, route: usize, wp: u
             lost_timer: 0.0,
             attack_cd: 0.0,
             attack_anim: 0.0,
+            stun_left: 0.0,
             home: pos,
         },
     );
@@ -134,9 +135,22 @@ pub fn npc_ai(
     // 2) живые игроки (id, позиция) для проверки видимости
     let plist: Vec<(u64, Vec2)> = players.0.iter().map(|(&id, s)| (id, s.pos)).collect();
 
+    // позиции неписей, которые НА ЭТОМ тике начали атаку — для позиционного
+    // звука удара (слышно даже за стеной, см. рассылку ниже).
+    let mut attack_pings: Vec<Vec2> = Vec::new();
+
     for (&nid, n) in npcs.0.iter_mut() {
         n.attack_cd = (n.attack_cd - dt).max(0.0);
         n.attack_anim = (n.attack_anim - dt).max(0.0);
+
+        // ОГЛУШЕНИЕ: пока тикает stun_left — непись полностью бездействует (не
+        // двигается, не атакует, не реагирует). Сбрасываем анимацию атаки, чтобы
+        // не «домахивала» сквозь стан. Клиент рисует звёздочки по stun_left.
+        if n.stun_left > 0.0 {
+            n.stun_left = (n.stun_left - dt).max(0.0);
+            n.attack_anim = 0.0;
+            continue;
+        }
 
         // ближайший игрок в радиусе и без стены на линии
         let mut seen: Option<(u64, Vec2, f32)> = None;
@@ -160,6 +174,7 @@ pub fn npc_ai(
             if in_range && n.attack_cd <= 0.0 {
                 n.attack_cd = NPC_ATTACK_COOLDOWN;
                 n.attack_anim = NPC_ATTACK_ANIM;
+                attack_pings.push(n.pos);
                 dmg.write(DamageEvent {
                     target: pid,
                     amount: NPC_ATTACK_DAMAGE,
@@ -281,6 +296,27 @@ pub fn npc_ai(
         }
     }
 
+    // 3.5) позиционный звук атаки неписей — шлём каждому игроку в радиусе
+    // слышимости (в обход куллинга видимости: слышно и из-за стены). Клиент сам
+    // затухает громкость по дистанции.
+    if !attack_pings.is_empty() {
+        let r2 = NPC_AUDIO_RADIUS * NPC_AUDIO_RADIUS;
+        let endpoint = server.endpoint_mut();
+        for src in &attack_pings {
+            for (pid, ppos) in &plist {
+                if (*ppos - *src).length_squared() <= r2 {
+                    endpoint
+                        .send_message_on(
+                            *pid,
+                            CH_S2C,
+                            S2C::NpcSound { kind: NpcSoundKind::Attack, x: src.x, y: src.y },
+                        )
+                        .ok();
+                }
+            }
+        }
+    }
+
     // 4) автоспавн: держим ПОСТОЯННОЕ число скелетов — пополняем всех недостающих
     if respawn.0.tick(time.delta()).just_finished() && !routes.0.is_empty() {
         while npcs.0.len() < NPC_TARGET_POP {
@@ -293,6 +329,98 @@ pub fn npc_ai(
             spawn_npc(&mut npcs, &mut id_counter, ri, 0, pos);
         }
     }
+}
+
+/// Планировщик амбиентных рыков: на каждого игрока держим момент следующего рыка
+/// и простой ГСЧ. Когда время пришло — шлём рык ближайшей слышимой неписи.
+#[derive(Resource)]
+pub struct NpcGrowlSched {
+    /// Глобальные часы (сек, монотонно растут) — общая шкала для всех таймеров.
+    clock: f32,
+    /// На каждого игрока: момент (по `clock`), когда можно издать следующий рык.
+    next: HashMap<u64, f32>,
+    /// Состояние xorshift-ГСЧ (детерминированный выбор неписи/джиттера).
+    rng: u64,
+}
+
+impl Default for NpcGrowlSched {
+    fn default() -> Self {
+        Self {
+            clock: 0.0,
+            next: HashMap::new(),
+            rng: 0x9E37_79B9_7F4A_7C15,
+        }
+    }
+}
+
+impl NpcGrowlSched {
+    fn next_u64(&mut self) -> u64 {
+        let mut x = self.rng | 1;
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        self.rng = x;
+        x
+    }
+    /// Случайное число в [0,1).
+    fn unit(&mut self) -> f32 {
+        (self.next_u64() >> 11) as f32 / (1u64 << 53) as f32
+    }
+}
+
+/// Амбиентные рыки неписей (серверный авторитет). Для каждого игрока изредка
+/// выбираем ближайшую слышимую непись в радиусе `NPC_AUDIO_RADIUS` (в обход
+/// куллинга видимости — слышно и за стеной) и шлём ему позиционный `NpcSound`.
+/// Клиент сам делает тише/громче по дистанции, чтобы на слух понимать, далеко ли
+/// зомби. Если слышимых неписей нет — просто переносим проверку на чуть позже.
+pub fn npc_audio_growls(
+    time: Res<Time>,
+    npcs: Res<Npcs>,
+    players: Res<PlayerStates>,
+    mut sched: ResMut<NpcGrowlSched>,
+    mut server: ResMut<QuinnetServer>,
+) {
+    sched.clock += time.delta_secs();
+    let r2 = NPC_AUDIO_RADIUS * NPC_AUDIO_RADIUS;
+
+    let plist: Vec<(u64, Vec2)> = players.0.iter().map(|(&id, s)| (id, s.pos)).collect();
+    let npos: Vec<Vec2> = npcs.0.values().map(|n| n.pos).collect();
+
+    let clock = sched.clock;
+    let endpoint = server.endpoint_mut();
+    for (pid, ppos) in &plist {
+        let due = *sched.next.get(pid).unwrap_or(&0.0);
+        if clock < due {
+            continue;
+        }
+        // слышимые непись для этого игрока
+        let audible: Vec<Vec2> = npos
+            .iter()
+            .copied()
+            .filter(|p| (*p - *ppos).length_squared() <= r2)
+            .collect();
+        let when = if !audible.is_empty() {
+            let idx = (sched.next_u64() as usize) % audible.len();
+            let src = audible[idx];
+            endpoint
+                .send_message_on(
+                    *pid,
+                    CH_S2C,
+                    S2C::NpcSound { kind: NpcSoundKind::Growl, x: src.x, y: src.y },
+                )
+                .ok();
+            // следующий рык — через интервал с джиттером ±40%
+            let jitter = 0.6 + 0.8 * sched.unit();
+            clock + NPC_GROWL_INTERVAL * jitter
+        } else {
+            // никого не слышно — перепроверим через секунду
+            clock + 1.0
+        };
+        sched.next.insert(*pid, when);
+    }
+
+    // забываем отключившихся игроков, чтобы карта не пухла
+    sched.next.retain(|id, _| players.0.contains_key(id));
 }
 
 /// Следующая путевая точка с разворотом на концах (ping-pong).

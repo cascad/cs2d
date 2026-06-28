@@ -1,19 +1,21 @@
 use crate::events::{DamageEvent, NpcDamageEvent};
 use crate::resources::{
     Accounts, AppliedSeqs, GrenadeState, Grenades, LastGrenadeThrows, LastHeard, Npcs,
-    PendingInputs, PendingMelee, PendingMelees, PlayerState, PlayerStates, SnapshotHistory,
-    SpawnPoints, SpawnedClients, WallGridRes,
+    PendingInputs, PendingMelee, PendingMelees, PendingStun, PendingStuns, PlayerState,
+    PlayerStates, SnapshotHistory, SpawnPoints, SpawnedClients, WallGridRes,
 };
 use crate::scoreboard::AuthOutcome;
 use crate::systems::spawn::pick_spawn_point;
 use crate::utils::check_hit_lag_comp;
 use bevy::prelude::*;
 use bevy_quinnet::server::QuinnetServer;
-use protocol::combat::in_melee_sector;
+use protocol::abilities::AbilityConfig;
+use protocol::combat::{block_absorbs, in_melee_sector};
 use protocol::constants::{
-    grenade_max_reach, CH_C2S, CH_S2C, GRENADE_RADIUS, GRENADE_SPEED, GRENADE_TIMER,
-    GRENADE_USAGE_COOLDOWN, HITBOX_RADIUS, MAX_LAG_COMP, MELEE_DAMAGE, MELEE_HALF_ANGLE,
-    MELEE_HALF_WIDTH, MELEE_RANGE, NPC_RADIUS, SHOOT_RIFLE_DAMAGE,
+    grenade_max_reach, BLOCK_ARC_HALF_ANGLE, BLOCK_HIT_STAMINA_COST, CH_C2S, CH_S2C, GRENADE_RADIUS,
+    GRENADE_SPEED, GRENADE_TIMER, GRENADE_USAGE_COOLDOWN, HITBOX_RADIUS, MAX_LAG_COMP, MELEE_DAMAGE,
+    MELEE_HALF_ANGLE, MELEE_HALF_WIDTH, MELEE_RANGE, NPC_RADIUS, SHOOT_RIFLE_DAMAGE, STUN_DAMAGE,
+    STUN_HALF_WIDTH, STUN_RANGE,
 };
 use protocol::messages::{C2S, GrenadeEvent, S2C, ShootFx};
 
@@ -379,6 +381,94 @@ pub fn resolve_melees(
                     amount: MELEE_DAMAGE as i32,
                     source: Some(m.attacker),
                 });
+            }
+        }
+    }
+    pending.0 = keep;
+}
+
+/// Накладывает оглушение от запланированных ударов щитом, когда подошёл момент
+/// «середины замаха». Зона та же, что у melee (сектор постоянной ширины), но
+/// вместо урона ставит цели `stun_left`. В поднятый фронтальный щит стан НЕ
+/// проходит (как и урон): такой удар лишь тратит стамину блокирующего.
+pub fn resolve_stuns(
+    mut pending: ResMut<PendingStuns>,
+    mut states: ResMut<PlayerStates>,
+    mut npcs: ResMut<Npcs>,
+    walls: Res<WallGridRes>,
+    time: Res<Time>,
+    mut damage_events: MessageWriter<DamageEvent>,
+    mut npc_damage_events: MessageWriter<NpcDamageEvent>,
+) {
+    let now = time.elapsed_secs_f64();
+    const NPC_MELEE_HITBOX: f32 = HITBOX_RADIUS + NPC_RADIUS;
+    let cfg = AbilityConfig::default(); // для длительности стана (stun_duration)
+
+    let mut keep: Vec<PendingStun> = Vec::with_capacity(pending.0.len());
+    for s in pending.0.drain(..) {
+        if now < s.resolve_at {
+            keep.push(s);
+            continue;
+        }
+        // атакующий мог отключиться/умереть — берём его актуальную позицию, иначе
+        // ту, что зафиксировали при замахе (он мог не двигаться под attack_lock).
+        let from = states.0.get(&s.attacker).map(|a| a.pos).unwrap_or(s.from);
+
+        // игроки: удар щитом немного дамажит И оглушает. И урон, и стан гасятся
+        // фронтальным блоком одинаково — поэтому решение по дуге считаем тут, а сам
+        // урон/расход стамины централизованно делает `apply_damage` (тот же
+        // block_absorbs, та же стамина в этот тик — решения совпадают). Стан
+        // накладываем ровно когда удар НЕ заблокирован.
+        for (&tid, tst) in states.0.iter_mut() {
+            if tid == s.attacker {
+                continue;
+            }
+            let hit = in_melee_sector(
+                from,
+                s.dir,
+                tst.pos,
+                HITBOX_RADIUS,
+                STUN_RANGE,
+                MELEE_HALF_ANGLE,
+                STUN_HALF_WIDTH,
+            ) && !walls.0.segment_blocked(from, tst.pos, 0.001);
+            if !hit {
+                continue;
+            }
+            // небольшой урон (apply_damage сам погасит его блоком и спишет стамину)
+            damage_events.write(DamageEvent {
+                target: tid,
+                amount: STUN_DAMAGE as i32,
+                source: Some(s.attacker),
+                source_pos: None,
+                npc_source: None,
+            });
+            // оглушение — только если фронтальный блок не поглотил удар
+            let in_arc = block_absorbs(tst.pos, tst.rot, from, BLOCK_ARC_HALF_ANGLE);
+            let blocked = tst.blocking && in_arc && tst.abilities.stamina >= BLOCK_HIT_STAMINA_COST;
+            if !blocked {
+                tst.abilities.apply_stun(&cfg);
+            }
+        }
+
+        // непись: щита нет — всегда дамажится и оглушается.
+        for (&nid, npc) in npcs.0.iter_mut() {
+            let hit = in_melee_sector(
+                from,
+                s.dir,
+                npc.pos,
+                NPC_MELEE_HITBOX,
+                STUN_RANGE,
+                MELEE_HALF_ANGLE,
+                STUN_HALF_WIDTH,
+            ) && !walls.0.segment_blocked(from, npc.pos, 0.001);
+            if hit {
+                npc_damage_events.write(NpcDamageEvent {
+                    target: nid,
+                    amount: STUN_DAMAGE as i32,
+                    source: Some(s.attacker),
+                });
+                npc.stun_left = cfg.stun_duration;
             }
         }
     }

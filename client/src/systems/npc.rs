@@ -112,6 +112,11 @@ pub struct NpcInfo(pub HashMap<u32, (i32, bool, bool)>);
 #[derive(Resource, Default)]
 pub struct NpcLastSeen(pub HashMap<u32, f64>);
 
+/// id неписи → остаток оглушения (сек) из снапшота. Используется системой
+/// «звёздочек» над оглушёнными неписями.
+#[derive(Resource, Default)]
+pub struct NpcStun(pub HashMap<u32, f32>);
+
 /// Экранный 8-сектор из мирового угла (0=E..7=SE) — тем же способом, что и рыцарь.
 #[inline]
 pub fn npc_dir(facing_world: f32) -> usize {
@@ -209,6 +214,7 @@ pub fn apply_npc_snapshot(
     mut spawned: ResMut<SpawnedNpcs>,
     mut info: ResMut<NpcInfo>,
     mut last_seen: ResMut<NpcLastSeen>,
+    mut npc_stun: ResMut<NpcStun>,
 ) {
     let Some(anims) = anims else { return };
     let Some(snap) = buffer.snapshots.back() else { return };
@@ -216,6 +222,7 @@ pub fn apply_npc_snapshot(
     for n in &snap.npcs {
         last_seen.0.insert(n.id, now);
         info.0.insert(n.id, (n.hp, n.aggro, n.attacking));
+        npc_stun.0.insert(n.id, n.stun_left);
         if !spawned.0.contains_key(&n.id) {
             let e =
                 spawn_npc_entity(&mut commands, &anims, n.kind, n.id, Vec2::new(n.x, n.y), n.facing);
@@ -345,6 +352,7 @@ pub fn fade_unseen_npcs(
     mut last_seen: ResMut<NpcLastSeen>,
     mut spawned: ResMut<SpawnedNpcs>,
     mut info: ResMut<NpcInfo>,
+    mut npc_stun: ResMut<NpcStun>,
     q: Query<(Entity, &NpcMarker)>,
 ) {
     let now = time_in_seconds();
@@ -360,6 +368,7 @@ pub fn fade_unseen_npcs(
         spawned.0.remove(&id);
         last_seen.0.remove(&id);
         info.0.remove(&id);
+        npc_stun.0.remove(&id);
     }
 }
 

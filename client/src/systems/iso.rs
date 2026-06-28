@@ -44,6 +44,9 @@ pub struct KnightAnims {
     pub rolling: Handle<Image>,
     pub block: Handle<Image>,
     pub death: Handle<Image>,
+    pub kick: Handle<Image>,
+    pub hurt: Handle<Image>,
+    pub cast: Handle<Image>,
     pub layout: Handle<TextureAtlasLayout>,
 }
 
@@ -56,6 +59,9 @@ impl KnightAnims {
             AnimState::Attack => self.melee.clone(),
             AnimState::Dash => self.rolling.clone(),
             AnimState::Block => self.block.clone(),
+            AnimState::Kick => self.kick.clone(),
+            AnimState::Hurt => self.hurt.clone(),
+            AnimState::Cast => self.cast.clone(),
         }
     }
 }
@@ -102,6 +108,9 @@ pub fn setup_iso(
         rolling: asset_server.load("knight/Rolling.png"),
         block: asset_server.load("knight/Block.png"),
         death: asset_server.load("knight/Death.png"),
+        kick: asset_server.load("knight/Kick.png"),
+        hurt: asset_server.load("knight/TakeDamage.png"),
+        cast: asset_server.load("knight/CastSpell.png"),
         layout,
     });
 
@@ -209,6 +218,18 @@ pub fn animate_actors(
         let moved = (wp.0 - anim.prev).length();
         anim.prev = wp.0;
 
+        // оглушение: плавно тикаем остаток (снапшоты его перезаписывают). Пока
+        // оглушён — модель замирает в Idle (ни ходьбы, ни действий); звёздочки над
+        // головой рисует отдельная система по этому же `stun_left`.
+        anim.stun_left = (anim.stun_left - dt.as_secs_f32()).max(0.0);
+        let stunned = anim.stun_left > 0.0;
+        if stunned && anim.state != AnimState::Idle {
+            anim.state = AnimState::Idle;
+            anim.frame = 0;
+            anim.timer.reset();
+            anim.lock_facing = None;
+        }
+
         let oneshot = anim.state.is_oneshot();
 
         // нужная частота кадров зависит от типа анимации:
@@ -232,7 +253,9 @@ pub fn animate_actors(
             anim.frame = anim.frame.wrapping_add(1);
         }
 
-        if oneshot {
+        if stunned {
+            // замерли в Idle — ничего не переключаем (кадр циклится сам)
+        } else if oneshot {
             // доиграли действие — возвращаемся к idle/walk по факту движения
             if anim.frame >= KNIGHT_COLS {
                 let base = if moved > WALK_EPS { AnimState::Walk } else { AnimState::Idle };
@@ -296,11 +319,18 @@ pub fn flash_on_damage(
 ) {
     for ev in reader.read() {
         if ev.damage <= 0 {
-            continue;
+            continue; // блок/0 урона — без вспышки и без анимации боли
         }
         for (m, mut anim) in q.iter_mut() {
             if m.0 == ev.id {
                 anim.hit_flash = HIT_FLASH_TIME;
+                // Анимация получения урона (TakeDamage). НЕ прерываем уже идущие
+                // одноразовые действия (удар/перекат/каст/удар щитом) и не мешаем
+                // оглушённой позе — иначе ломали бы их визуал; играем только из
+                // спокойного состояния (idle/walk/block).
+                if !anim.state.is_oneshot() && anim.stun_left <= 0.0 {
+                    anim.start_action(AnimState::Hurt);
+                }
             }
         }
     }

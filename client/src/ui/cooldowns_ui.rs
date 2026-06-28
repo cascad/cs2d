@@ -5,12 +5,13 @@
 use bevy::prelude::*;
 
 use crate::resources::{LocalAbilities, UiFont};
-use protocol::constants::{DASH_COOLDOWN, MELEE_COOLDOWN};
+use protocol::constants::{DASH_COOLDOWN, MELEE_COOLDOWN, STUN_COOLDOWN};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum CdKind {
     Dash,
     Melee,
+    Stun,
 }
 
 #[derive(Component)]
@@ -67,9 +68,10 @@ fn spawn_indicator(commands: &mut Commands, font: &Handle<Font>, bottom: f32, la
 }
 
 pub fn setup_cooldowns_ui(mut commands: Commands, font: Res<UiFont>) {
-    // над стаминой (42) и гранатой (20): удар на 86, рывок на 64
-    spawn_indicator(&mut commands, &font.0, 86.0, "ATK", CdKind::Melee);
+    // над стаминой (42) и гранатой (20): рывок 64, удар 86, стан (Q) 108
     spawn_indicator(&mut commands, &font.0, 64.0, "DASH", CdKind::Dash);
+    spawn_indicator(&mut commands, &font.0, 86.0, "ATK", CdKind::Melee);
+    spawn_indicator(&mut commands, &font.0, 108.0, "STUN", CdKind::Stun);
 }
 
 pub fn update_cooldowns_ui(
@@ -80,6 +82,7 @@ pub fn update_cooldowns_ui(
         let (cd_left, cd_max) = match bar.0 {
             CdKind::Dash => (abil.0.dash_cd_left, DASH_COOLDOWN),
             CdKind::Melee => (abil.0.melee_cd_left, MELEE_COOLDOWN),
+            CdKind::Stun => (abil.0.stun_cd_left, STUN_COOLDOWN),
         };
         let ready = cd_left <= 0.0;
         let frac = if ready {

@@ -15,9 +15,12 @@ pub struct ScoreboardRoot;
 #[derive(Component)]
 pub struct ScoreboardRows;
 
-const COL_KILLS: f32 = 70.0;
-const COL_NPC: f32 = 70.0;
-const COL_DEATHS: f32 = 70.0;
+// Колонки должны быть шире самых длинных заголовков («Убийства»), иначе текст
+// вылезает за ячейку и «слипается» с соседним. Числа центрируем под шапкой.
+const COL_KILLS: f32 = 104.0;
+const COL_NPC: f32 = 104.0;
+const COL_DEATHS: f32 = 96.0;
+const COL_NAME_MIN: f32 = 150.0;
 
 pub fn setup_scoreboard_ui(mut commands: Commands, font: Res<UiFont>) {
     commands
@@ -114,8 +117,16 @@ fn cell(
         ..default()
     };
     match width {
-        Some(w) => node.width = Val::Px(w),
-        None => node.flex_grow = 1.0,
+        // фиксированные числовые колонки — текст по центру под заголовком
+        Some(w) => {
+            node.width = Val::Px(w);
+            node.justify_content = JustifyContent::Center;
+        }
+        // колонка имени тянется, но не уже минимума (иначе длинные имена давят числа)
+        None => {
+            node.flex_grow = 1.0;
+            node.min_width = Val::Px(COL_NAME_MIN);
+        }
     }
     parent.spawn((
         node,

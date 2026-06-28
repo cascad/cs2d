@@ -26,3 +26,5 @@ pub mod melee;
 pub mod fog;
 pub mod iso;
 pub mod npc;
+pub mod stun_stars;
+pub mod audio;

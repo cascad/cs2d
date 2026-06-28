@@ -1,10 +1,16 @@
-//! Конфиг клиента в файле РЯДОМ с бинарём (`client_config.toml`). Задаёт адрес и
-//! порт сервера, которые подставляются в меню как значение по умолчанию. Если
-//! файла нет — создаётся с дефолтами (127.0.0.1:6000). Битый файл → дефолты.
+//! Конфиг клиента `client_config.toml`. Задаёт адрес/порт сервера (значение по
+//! умолчанию в меню), имя/пароль аккаунта и список серверов для лобби.
+//!
+//! Поиск: `--config <path>` (если задан) → рабочий каталог → рядом с бинарём.
+//! - Файл найден, но TOML битый → клиент ПАДАЕТ с логом (лучше упасть, чем молча
+//!   зайти под случайным именем — это и приводило к «опять рандомный ник»).
+//! - `--config` указан, но файла нет/не читается → тоже падаем (его задали явно).
+//! - Конфига нигде нет → НЕ ломаемся: дефолты (127.0.0.1:6000) со случайным именем
+//!   `Player#xxxx`; на диск ничего не пишем, поэтому при перезапуске имя новое.
 
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 const FILE_NAME: &str = "client_config.toml";
 
@@ -39,6 +45,29 @@ pub struct ClientConfig {
 
 fn default_name() -> String {
     "Player".to_string()
+}
+
+/// Короткий случайный хвост к имени в стиле Discord (`Player#a3f9`). Без внешних
+/// крейтов: мешаем наносекунды и pid, прогоняем через xorshift и берём 4 hex.
+/// Этого «кусочка» хватает, чтобы клиенты на одной машине не сливались в один
+/// аккаунт, и при каждом перезапуске (без конфига) имя получается новым.
+fn random_suffix() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0);
+    let pid = std::process::id() as u64;
+    let mut x = nanos ^ pid.rotate_left(32) ^ nanos.rotate_left(17) ^ 0x9E37_79B9_7F4A_7C15;
+    x ^= x << 13;
+    x ^= x >> 7;
+    x ^= x << 17;
+    format!("{:04x}", x & 0xffff)
+}
+
+/// Сгенерированное имя для случая «конфига рядом нет» — `Player#xxxx`.
+fn generated_name() -> String {
+    format!("Player#{}", random_suffix())
 }
 
 impl Default for ClientConfig {
@@ -76,61 +105,82 @@ fn cli_config_path() -> Option<PathBuf> {
     None
 }
 
-/// Путь к конфигу: сперва `--config`, затем рядом с бинарём, иначе — рабочий каталог.
-fn config_path() -> PathBuf {
-    if let Some(p) = cli_config_path() {
-        return p;
-    }
+/// Кандидаты на авто-поиск конфига (когда `--config` не задан), по приоритету:
+/// 1) рабочий каталог (так его находит `cargo run` из корня проекта);
+/// 2) каталог рядом с бинарём (так его находит распакованная сборка).
+/// Используется ПЕРВЫЙ существующий.
+fn auto_candidates() -> Vec<PathBuf> {
+    let mut v = vec![PathBuf::from(FILE_NAME)]; // cwd/client_config.toml
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
-            return dir.join(FILE_NAME);
+            let p = dir.join(FILE_NAME);
+            if !v.contains(&p) {
+                v.push(p);
+            }
         }
     }
-    PathBuf::from(FILE_NAME)
+    v
 }
 
-/// Читает конфиг рядом с бинарём; если файла нет — создаёт с дефолтами.
-pub fn load_or_create() -> ClientConfig {
-    let path = config_path();
-    match std::fs::read_to_string(&path) {
-        Ok(text) => match toml::from_str::<ClientConfig>(&text) {
-            Ok(cfg) => {
-                info!("⚙ config loaded: {}", path.display());
-                cfg
-            }
-            Err(e) => {
-                warn!(
-                    "ошибка чтения {}: {e}; беру значения по умолчанию",
-                    path.display()
-                );
-                ClientConfig::default()
-            }
-        },
-        Err(_) => {
-            let cfg = ClientConfig::default();
-            let header = "# Конфиг клиента CS2D.\n\
-                # ip/port — адрес по умолчанию для строки ручного ввода в меню.\n\
-                # name/password — аккаунт для авторизации и таблицы очков. Первый\n\
-                #   вход под именем регистрирует его (с паролем), далее пароль\n\
-                #   сверяется. Пустой пароль допустим. Для нескольких клиентов на\n\
-                #   одной машине задайте разные name в отдельных конфигах.\n\
-                # [[servers]] — список серверов для мини-лобби; каждый\n\
-                #   проверяется на активность (имя/игроки берутся с сервера).\n\
-                #   Пример:\n\
-                #   [[servers]]\n\
-                #   name = \"My Server\"\n\
-                #   address = \"100.67.225.13:6000\"\n";
-            match toml::to_string_pretty(&cfg) {
-                Ok(body) => {
-                    if let Err(e) = std::fs::write(&path, format!("{header}{body}")) {
-                        warn!("не удалось создать {}: {e}", path.display());
-                    } else {
-                        info!("⚙ создан конфиг по умолчанию: {}", path.display());
-                    }
-                }
-                Err(e) => warn!("сериализация конфига не удалась: {e}"),
-            }
+/// Конфиг по умолчанию, но со СГЕНЕРИРОВАННЫМ именем (`Player#xxxx`). Используем
+/// ТОЛЬКО когда конфига нигде нет: файл при этом НЕ создаём, поэтому при каждом
+/// перезапуске клиента имя будет новым.
+fn generated_default() -> ClientConfig {
+    ClientConfig {
+        name: generated_name(),
+        ..ClientConfig::default()
+    }
+}
+
+/// Парсит текст конфига или ЛОМАЕТ клиент с понятным логом. Битый TOML — это
+/// ошибка пользователя (а не повод молча подменить имя на случайное): лучше упасть
+/// громко, чем зайти в игру под чужим/рандомным ником.
+fn parse_or_panic(text: &str, path: &Path) -> ClientConfig {
+    match toml::from_str::<ClientConfig>(text) {
+        Ok(cfg) => {
+            info!("⚙ config loaded: {} (name = {})", path.display(), cfg.name);
             cfg
         }
+        Err(e) => {
+            // load_or_create вызывается ДО инициализации логгера Bevy — пишем в
+            // stderr напрямую (panic туда же), чтобы сообщение точно было видно.
+            eprintln!(
+                "[config] FATAL: не удалось разобрать {}:\n{e}\n\
+                 Почините TOML (или удалите файл — тогда сгенерируется случайное имя).",
+                path.display()
+            );
+            panic!("битый конфиг {}: {e}", path.display());
+        }
     }
+}
+
+/// Загружает конфиг клиента:
+/// - `--config <path>`: файл ОБЯЗАН существовать и парситься, иначе — паника;
+/// - иначе ищем `client_config.toml` в рабочем каталоге и рядом с бинарём; первый
+///   существующий парсим (битый → паника с логом);
+/// - если конфига нигде нет — клиент НЕ ломается: дефолты со случайным именем
+///   `Player#xxxx` (на диск ничего не пишем, поэтому при перезапуске имя новое).
+pub fn load_or_create() -> ClientConfig {
+    // 1) Явный путь — обязателен и не прощает ошибок (его задали намеренно).
+    if let Some(path) = cli_config_path() {
+        let text = std::fs::read_to_string(&path).unwrap_or_else(|e| {
+            eprintln!("[config] FATAL: --config {}: {e}", path.display());
+            panic!("не удалось прочитать --config {}: {e}", path.display());
+        });
+        return parse_or_panic(&text, &path);
+    }
+    // 2) Авто-поиск: первый существующий кандидат. Битый — паника (см. parse_or_panic).
+    for path in auto_candidates() {
+        if let Ok(text) = std::fs::read_to_string(&path) {
+            return parse_or_panic(&text, &path);
+        }
+    }
+    // 3) Конфига нигде нет — это НЕ ошибка: дефолты со случайным именем.
+    let cfg = generated_default();
+    eprintln!(
+        "[config] конфиг не найден (ни в рабочем каталоге, ни рядом с бинарём); \
+         имя сгенерировано: {} (файл не создаётся — при перезапуске будет новое)",
+        cfg.name
+    );
+    cfg
 }

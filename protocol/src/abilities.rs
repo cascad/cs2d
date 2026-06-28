@@ -35,8 +35,20 @@ pub struct AbilityConfig {
     /// СЕРВЕРЕ = `MELEE_CD_GRACE` — гасит ±1 тик рассинхрона двух таймеров, чтобы
     /// предсказанный честным клиентом взмах гарантированно наносил урон.
     pub melee_grace: f32,
+    /// Допуск готовности рывка (как `melee_grace`): на клиенте 0, на сервере
+    /// `DASH_CD_GRACE`. Гарантирует, что предсказанный честным клиентом рывок
+    /// выполнится и на сервере — иначе сервер двигал бы игрока без анимации.
+    pub dash_grace: f32,
     pub turn_rate: f32,         // скорость разворота к прицелу, рад/сек
     pub attack_facing_lock: f32, // заморозка разворота на время удара, сек
+    // --- Stun (удар щитом, Q) ---
+    pub stun_cooldown: f32,   // КД способности
+    pub stun_cost: f32,       // расход стамины на удар щитом
+    pub stun_duration: f32,   // длительность оглушения цели
+    pub stun_facing_lock: f32, // заморозка движения/разворота на время Kick
+    /// Допуск готовности удара щитом (как `melee_grace`): на клиенте 0, на сервере
+    /// `STUN_CD_GRACE`.
+    pub stun_grace: f32,
 }
 
 impl Default for AbilityConfig {
@@ -62,8 +74,16 @@ impl Default for AbilityConfig {
             melee_cooldown: MELEE_COOLDOWN,
             // по умолчанию строго (клиент); сервер поднимает до MELEE_CD_GRACE
             melee_grace: 0.0,
+            // по умолчанию строго (клиент); сервер поднимает до DASH_CD_GRACE
+            dash_grace: 0.0,
             turn_rate: TURN_RATE,
             attack_facing_lock: ATTACK_FACING_LOCK,
+            stun_cooldown: STUN_COOLDOWN,
+            stun_cost: STUN_STAMINA_COST,
+            stun_duration: STUN_DURATION,
+            stun_facing_lock: STUN_FACING_LOCK,
+            // по умолчанию строго (клиент); сервер поднимает до STUN_CD_GRACE
+            stun_grace: 0.0,
         }
     }
 }
@@ -79,6 +99,11 @@ pub struct Abilities {
     pub block_charge: f32, // сколько непрерывно держится блок
     pub facing: f32,          // ТЕКУЩИЙ угол модели (плавно догоняет прицел)
     pub attack_lock_left: f32, // сек заморозки разворота из-за удара
+    pub stun_cd_left: f32, // сек до готовности удара щитом (Q)
+    /// Сек оглушения, оставшегося НА САМОМ игроке: пока >0, управление
+    /// игнорируется (нельзя ходить/бить/блокировать/разворачиваться). Авторитет —
+    /// сервер; клиент сидит это значение из снапшота для совпадения предсказания.
+    pub stun_left: f32,
 }
 
 impl Default for Abilities {
@@ -92,6 +117,8 @@ impl Default for Abilities {
             block_charge: 0.0,
             facing: 0.0,
             attack_lock_left: 0.0,
+            stun_cd_left: 0.0,
+            stun_left: 0.0,
         }
     }
 }
@@ -104,6 +131,7 @@ pub struct AbilityInput {
     pub want_dash: bool,
     pub want_block: bool,
     pub want_attack: bool, // запрос ближнего удара на этом тике
+    pub want_stun: bool,   // запрос удара щитом (Q) на этом тике
 }
 
 /// Результат тика: эффективное движение и состояние блока.
@@ -116,6 +144,9 @@ pub struct AbilityOutput {
     pub dash_dir: Vec2,    // направление рывка (для анимации переката) — валидно при did_dash
     pub did_attack: bool,  // в этот тик стартовал ближний удар
     pub attack_dir: Vec2,  // направление удара (по прицелу) — для FX и резолва урона
+    pub did_stun: bool,    // в этот тик стартовал удар щитом (Q)
+    pub stun_dir: Vec2,    // направление удара щитом (по прицелу) — для FX и резолва
+    pub stunned: bool,     // игрок СЕЙЧАС оглушён (управление игнорируется)
     pub facing: f32,       // ТЕКУЩИЙ угол модели после разворота этого тика
 }
 
@@ -132,6 +163,28 @@ impl Abilities {
         self.melee_cd_left = cfg.melee_cooldown;
         self.stamina = (self.stamina - cfg.melee_cost).max(0.0);
         self.attack_lock_left = cfg.attack_facing_lock;
+    }
+
+    /// Готов ли удар щитом (КД с допуском `stun_grace` прошёл и хватает стамины).
+    pub fn stun_ready(&self, cfg: &AbilityConfig) -> bool {
+        self.stun_cd_left <= cfg.stun_grace && self.stamina >= cfg.stun_cost
+    }
+
+    /// Зафиксировать удар щитом: КД, стамина и заморозка движения/разворота на
+    /// время анимации Kick.
+    pub fn consume_stun(&mut self, cfg: &AbilityConfig) {
+        self.stun_cd_left = cfg.stun_cooldown;
+        self.stamina = (self.stamina - cfg.stun_cost).max(0.0);
+        self.attack_lock_left = cfg.stun_facing_lock;
+    }
+
+    /// Наложить/обновить оглушение на ЭТОГО игрока (сбрасывает таймер — «новый стан
+    /// обновляет полоску»). Прерывает текущие действия (рывок/удар/блок-заряд).
+    pub fn apply_stun(&mut self, cfg: &AbilityConfig) {
+        self.stun_left = cfg.stun_duration;
+        self.dash_left = 0.0;
+        self.attack_lock_left = 0.0;
+        self.block_charge = 0.0;
     }
 }
 
@@ -161,10 +214,37 @@ pub fn tick_abilities(
     dt: f32,
     cfg: &AbilityConfig,
 ) -> AbilityOutput {
-    // кулдауны
+    // кулдауны (тикают всегда, даже под станом — чтобы по выходу из стана КД были
+    // в актуальном состоянии, а стамина восстанавливалась)
     a.dash_cd_left = (a.dash_cd_left - dt).max(0.0);
     a.melee_cd_left = (a.melee_cd_left - dt).max(0.0);
+    a.stun_cd_left = (a.stun_cd_left - dt).max(0.0);
     a.attack_lock_left = (a.attack_lock_left - dt).max(0.0);
+
+    // ОГЛУШЕНИЕ: пока тикает stun_left — игрок полностью неуправляем. Гасим все
+    // намерения (ни шага, ни удара, ни блока, ни разворота). Это считается
+    // одинаково на клиенте (предсказание) и сервере (авторитет): клиент сидит
+    // stun_left из снапшота, поэтому замирает синхронно с сервером.
+    if a.stun_left > 0.0 {
+        a.stun_left = (a.stun_left - dt).max(0.0);
+        a.dash_left = 0.0;
+        a.block_charge = 0.0;
+        // стамина продолжает восстанавливаться, пока стоим оглушённые
+        a.stamina = (a.stamina + cfg.stamina_regen * dt).min(cfg.stamina_max);
+        return AbilityOutput {
+            move_dir: Vec2::ZERO,
+            speed: 0.0,
+            blocking: false,
+            did_dash: false,
+            dash_dir: a.dash_dir,
+            did_attack: false,
+            attack_dir: Vec2::ZERO,
+            did_stun: false,
+            stun_dir: Vec2::ZERO,
+            stunned: true,
+            facing: a.facing,
+        };
+    }
 
     // старт рывка (нельзя дважды одновременно); направление берём из текущего
     // (ещё не довёрнутого) угла, если нет ввода движения. Рывок приоритетнее
@@ -173,7 +253,7 @@ pub fn tick_abilities(
     let mut did_dash = false;
     if inp.want_dash
         && a.dash_left <= 0.0
-        && a.dash_cd_left <= 0.0
+        && a.dash_cd_left <= cfg.dash_grace
         && a.attack_lock_left <= 0.0 // нельзя дэшиться, пока не доиграл удар
         && a.stamina >= cfg.dash_cost
     {
@@ -202,6 +282,22 @@ pub fn tick_abilities(
         a.consume_melee(cfg);
         did_attack = true;
         attack_dir = Vec2::new(inp.aim.cos(), inp.aim.sin());
+    }
+
+    // Удар щитом (stun, Q) — ещё одно дискретное событие. Взаимоисключим с melee
+    // в этот тик (нельзя одновременно махать мечом и бить щитом); во время рывка
+    // или уже идущего удара — нельзя. consume_stun ставит КД/стамину/заморозку.
+    let mut did_stun = false;
+    let mut stun_dir = Vec2::ZERO;
+    if inp.want_stun
+        && !did_attack
+        && a.dash_left <= 0.0
+        && a.attack_lock_left <= 0.0
+        && a.stun_ready(cfg)
+    {
+        a.consume_stun(cfg);
+        did_stun = true;
+        stun_dir = Vec2::new(inp.aim.cos(), inp.aim.sin());
     }
 
     // Плавный разворот модели к прицелу. Во время рывка (вкл. только что
@@ -263,6 +359,9 @@ pub fn tick_abilities(
         dash_dir: a.dash_dir,
         did_attack,
         attack_dir,
+        did_stun,
+        stun_dir,
+        stunned: false,
         facing: a.facing,
     }
 }
@@ -282,6 +381,7 @@ mod tests {
             want_dash: dash,
             want_block: block,
             want_attack: false,
+            want_stun: false,
         }
     }
 
@@ -297,6 +397,7 @@ mod tests {
             want_dash: false,
             want_block: false,
             want_attack: false,
+            want_stun: false,
         };
         for _ in 0..1000 {
             tick_abilities(&mut a, &inp, 0.015, &cfg());
@@ -431,6 +532,7 @@ mod tests {
             want_dash: false,
             want_block: false,
             want_attack: true,
+            want_stun: false,
         }
     }
 
@@ -472,6 +574,7 @@ mod tests {
             want_dash: true,
             want_block: false,
             want_attack: true,
+            want_stun: false,
         };
         let out = tick_abilities(&mut a, &inp, TICK_DT, &cfg);
         assert!(out.did_dash);
@@ -485,7 +588,105 @@ mod tests {
             want_dash: false,
             want_block: false,
             want_attack: false,
+            want_stun: false,
         }
+    }
+
+    fn stun_at(aim: f32) -> AbilityInput {
+        AbilityInput {
+            move_dir: Vec2::ZERO,
+            aim,
+            want_dash: false,
+            want_block: false,
+            want_attack: false,
+            want_stun: true,
+        }
+    }
+
+    #[test]
+    fn stun_bash_triggers_and_consumes_cd_and_stamina() {
+        let cfg = cfg();
+        let mut a = Abilities::default();
+        let out = tick_abilities(&mut a, &stun_at(0.0), TICK_DT, &cfg);
+        assert!(out.did_stun, "удар щитом стартовал");
+        assert!((out.stun_dir - Vec2::new(1.0, 0.0)).length() < 1e-4);
+        assert!(a.stun_cd_left > 0.0, "встал КД щита");
+        // стамина списана на удар (в тот же тик идёт небольшая регенерация, поэтому
+        // допускаем зазор в один шаг реген.)
+        let spent = STAMINA_MAX - a.stamina;
+        assert!(
+            spent > STUN_STAMINA_COST - 1.0,
+            "стамина списана на удар щитом: потрачено {spent}"
+        );
+        // повторный удар сразу нельзя — КД не прошёл (клиентский grace = 0)
+        let out2 = tick_abilities(&mut a, &stun_at(0.0), TICK_DT, &cfg);
+        assert!(!out2.did_stun, "пока КД щита не прошёл — повторно нельзя");
+    }
+
+    #[test]
+    fn stun_and_melee_are_mutually_exclusive_in_one_tick() {
+        let cfg = cfg();
+        let mut a = Abilities::default();
+        let inp = AbilityInput {
+            move_dir: Vec2::ZERO,
+            aim: 0.0,
+            want_dash: false,
+            want_block: false,
+            want_attack: true,
+            want_stun: true,
+        };
+        let out = tick_abilities(&mut a, &inp, TICK_DT, &cfg);
+        assert!(out.did_attack, "melee имеет приоритет в этот тик");
+        assert!(!out.did_stun, "одновременно щит не бьёт");
+    }
+
+    #[test]
+    fn stunned_player_ignores_all_input_and_recovers() {
+        let cfg = cfg();
+        let mut a = Abilities::default();
+        a.apply_stun(&cfg); // оглушены на STUN_DURATION
+        assert!(a.stun_left > 0.0);
+        // пытаемся ходить/бить/дэшиться/блокировать — всё игнорируется
+        let inp = AbilityInput {
+            move_dir: Vec2::new(1.0, 0.0),
+            aim: core::f32::consts::PI,
+            want_dash: true,
+            want_block: true,
+            want_attack: true,
+            want_stun: true,
+        };
+        let out = tick_abilities(&mut a, &inp, TICK_DT, &cfg);
+        assert!(out.stunned, "помечен как оглушённый");
+        assert_eq!(out.move_dir, Vec2::ZERO, "не двигается");
+        assert_eq!(out.speed, 0.0);
+        assert!(!out.did_dash && !out.did_attack && !out.did_stun, "никаких действий");
+        assert_eq!(out.facing, 0.0, "не разворачивается");
+        assert!(!out.blocking, "блок под станом не ставится");
+
+        // по истечении времени снова управляем
+        let steps = (STUN_DURATION / TICK_DT) as usize + 2;
+        for _ in 0..steps {
+            tick_abilities(&mut a, &aim_at(0.0), TICK_DT, &cfg);
+        }
+        assert_eq!(a.stun_left, 0.0, "стан закончился");
+        let out2 = tick_abilities(&mut a, &moving_right(false, false), TICK_DT, &cfg);
+        assert!(out2.speed > 0.0, "после стана снова можно двигаться");
+    }
+
+    #[test]
+    fn apply_stun_refreshes_duration() {
+        let cfg = cfg();
+        let mut a = Abilities::default();
+        a.apply_stun(&cfg);
+        // потикали половину
+        for _ in 0..((STUN_DURATION * 0.5 / TICK_DT) as usize) {
+            tick_abilities(&mut a, &aim_at(0.0), TICK_DT, &cfg);
+        }
+        let mid = a.stun_left;
+        assert!(mid > 0.0 && mid < STUN_DURATION);
+        // новый стан сбрасывает таймер в полную длительность
+        a.apply_stun(&cfg);
+        assert!((a.stun_left - STUN_DURATION).abs() < 1e-4, "новый стан обновил длительность");
     }
 
     #[test]
@@ -521,6 +722,7 @@ mod tests {
                 want_dash: false,
                 want_block: false,
                 want_attack: false,
+            want_stun: false,
             },
             0.016,
             &cfg(),
@@ -556,6 +758,7 @@ mod tests {
                     want_dash: false,
                     want_block: false,
                     want_attack: false,
+            want_stun: false,
                 },
                 0.016,
                 &cfg(),
@@ -594,6 +797,7 @@ mod tests {
             want_dash: true,
             want_block: false,
             want_attack: false,
+            want_stun: false,
         };
         let out = tick_abilities(&mut b, &inp, 0.016, &cfg());
         assert!(out.did_dash);

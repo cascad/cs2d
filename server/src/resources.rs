@@ -41,6 +41,19 @@ pub struct PendingMelee {
 #[derive(Resource, Default)]
 pub struct PendingMelees(pub Vec<PendingMelee>);
 
+/// Запланированный (но ещё не наложенный) удар щитом (stun). Как `PendingMelee`,
+/// но вместо урона накладывает оглушение цели в `resolve_at` (середина анимации
+/// Kick), по позициям целей на этот момент. Урона не наносит.
+pub struct PendingStun {
+    pub attacker: u64,
+    pub from: Vec2,
+    pub dir: Vec2,
+    pub resolve_at: f64,
+}
+
+#[derive(Resource, Default)]
+pub struct PendingStuns(pub Vec<PendingStun>);
+
 #[derive(Resource)]
 pub struct ServerTickTimer(pub Timer);
 
@@ -175,6 +188,9 @@ pub struct Npc {
     pub attack_cd: f32,
     /// Сколько ещё секунд проигрывается анимация атаки (для снапшота клиенту).
     pub attack_anim: f32,
+    /// Остаток оглушения (сек): пока >0 — непись бездействует (ИИ заморожен),
+    /// клиент рисует «звёздочки» над головой.
+    pub stun_left: f32,
     pub home: Vec2,
 }
 

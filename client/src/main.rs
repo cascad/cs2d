@@ -39,8 +39,8 @@ use systems::{
     rotate_to_cursor::rotate_to_cursor,
     send_input::{send_input_and_predict, smooth_local_player},
     shoot::shoot_mouse,
-    startup::setup,
-};
+        startup::{despawn_game_camera, setup},
+    };
 use ui::update_grenade_cooldown_ui::update_grenade_cooldown_ui;
 
 use crate::{
@@ -63,6 +63,7 @@ use crate::{
     ui::minimap::{setup_minimap, toggle_minimap, update_minimap},
     ui::scoreboard::{setup_scoreboard_ui, update_scoreboard_ui},
     ui::stamina_ui::{setup_stamina_ui, update_stamina_ui},
+    ui::status_effects::{setup_status_effects_ui, update_status_effects_ui},
 };
 
 /// Где искать ассеты. Один и тот же бинарь должен работать и из исходников
@@ -132,12 +133,19 @@ fn main() {
         .insert_resource(crate::systems::npc::SpawnedNpcs::default())
         .insert_resource(crate::systems::npc::NpcInfo::default())
         .insert_resource(crate::systems::npc::NpcLastSeen::default())
+        .insert_resource(crate::systems::npc::NpcStun::default())
         // ивенты
         .add_message::<PlayerDamagedEvent>()
         .add_message::<PlayerDied>()
         .add_message::<PlayerLeftEvent>()
         .add_message::<GrenadeSpawnEvent>()
         .add_message::<GrenadeDetonatedEvent>()
+        .add_message::<crate::events::NpcDiedEvent>()
+        .add_message::<crate::events::NpcSoundEvent>()
+        .add_message::<crate::events::CombatSfxEvent>()
+        // звук: пулы клипов + ГСЧ выбора (амбиентные рыки теперь шлёт сервер)
+        .init_resource::<crate::systems::audio::AudioRng>()
+        .init_resource::<crate::systems::audio::BgMusicIdx>()
         // плагины
         .add_plugins(
             DefaultPlugins
@@ -172,6 +180,14 @@ fn main() {
         .add_plugins(crate::pause_menu::PauseMenuPlugin)
         // --- шрифты грузим заранее (нужны в меню тоже) ---
         .add_systems(Startup, (load_ui_font, setup_console_ui))
+        // --- звук: грузим клипы на старте; музыка вкл/выкл по входу/выходу с карты ---
+        .add_systems(Startup, crate::systems::audio::setup_audio)
+        .add_systems(OnEnter(AppState::InGame), crate::systems::audio::start_bg_music)
+        .add_systems(OnExit(AppState::InGame), crate::systems::audio::stop_bg_music)
+        .add_systems(
+            Update,
+            crate::systems::audio::advance_bg_music.run_if(in_state(AppState::InGame)),
+        )
         // --- консоль логов работает в любом состоянии (тоггл по `~`) ---
         .add_systems(Update, (toggle_console, update_console_ui))
         // --- Connecting: ждём первый снапшот и следим за таймаутом ---
@@ -199,6 +215,7 @@ fn main() {
                 setup_melee_hint,
                 setup_grenade_aim,
                 setup_scoreboard_ui,
+                setup_status_effects_ui,
             ),
         )
         // --- PreUpdate: сетка/инпут и приём сообщений только в InGame ---
@@ -218,7 +235,23 @@ fn main() {
         // заново авторизовался (и подхватил ту же статистику аккаунта на сервере)
         .add_systems(OnEnter(AppState::Connecting), reset_identity)
         .add_systems(OnEnter(AppState::InGame), spawn_aim_marker)
+        // выход из игры (возврат в меню/реконнект): убираем игровую камеру, чтобы
+        // не копились камеры с одинаковым order (рендер иначе спамит warning)
+        .add_systems(OnExit(AppState::InGame), despawn_game_camera)
         .add_systems(Update, update_aim_to_mouse.run_if(in_state(AppState::InGame)))
+        // --- звук по событиям боя (только на карте) ---
+        .add_systems(
+            Update,
+            (
+                crate::systems::audio::play_player_hit_sfx,
+                crate::systems::audio::play_npc_hit_sfx,
+                crate::systems::audio::play_npc_death_sfx,
+                crate::systems::audio::play_npc_sound_sfx,
+                crate::systems::audio::play_combat_sfx,
+                crate::systems::audio::play_explosion_sfx,
+            )
+                .run_if(in_state(AppState::InGame)),
+        )
         // --- Update: вся игровая логика только в InGame ---
         .add_systems(
             Update,
@@ -254,6 +287,8 @@ fn main() {
                     crate::systems::npc::animate_skeletons,
                     crate::systems::npc::animate_skeleton_corpses,
                     crate::systems::npc::spawn_npc_attack_decals,
+                    // звёздочки оглушения над игроками/неписями: ПОСЛЕ стана/спавна
+                    crate::systems::stun_stars::update_stun_stars,
                 )
                     .chain(),
                 // проекция мир→экран: ПОСЛЕ всех, кто двигает WorldPos, и ДО камеры
@@ -284,7 +319,7 @@ fn main() {
                 crate::systems::npc::fade_unseen_npcs,
                 update_minimap,
                 toggle_minimap,
-                update_scoreboard_ui,
+                (update_scoreboard_ui, update_status_effects_ui),
             )
                 .run_if(in_state(AppState::InGame)),
         )

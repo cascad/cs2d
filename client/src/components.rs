@@ -23,12 +23,21 @@ pub enum AnimState {
     Attack,
     Dash,
     Block,
+    /// Удар щитом (stun) — одноразовая анимация Kick.png.
+    Kick,
+    /// Получение урона — одноразовая анимация TakeDamage.png.
+    Hurt,
+    /// Бросок зелья/гранаты — одноразовая анимация CastSpell.png.
+    Cast,
 }
 
 impl AnimState {
     /// Одноразовая ли анимация (играется один раз, потом возврат к idle/walk).
     pub fn is_oneshot(self) -> bool {
-        matches!(self, AnimState::Attack | AnimState::Dash)
+        matches!(
+            self,
+            AnimState::Attack | AnimState::Dash | AnimState::Kick | AnimState::Hurt | AnimState::Cast
+        )
     }
 }
 
@@ -52,6 +61,9 @@ pub struct ActorAnim {
     /// Остаток времени «вспышки урона» (сек): модель краснеет при получении урона
     /// и плавно возвращается к норме. Видно и на себе, и на других игроках.
     pub hit_flash: f32,
+    /// Остаток оглушения (сек) для ЭТОГО актёра (из снапшота). Пока >0 — модель
+    /// замирает в Idle и над головой горят «звёздочки».
+    pub stun_left: f32,
 }
 
 impl ActorAnim {
@@ -81,6 +93,7 @@ impl Default for ActorAnim {
             lock_facing: None,
             blocking: false,
             hit_flash: 0.0,
+            stun_left: 0.0,
         }
     }
 }
@@ -199,3 +212,12 @@ pub struct DirNotch;
 
 #[derive(Component)]
 pub struct AimLineMarker;
+
+/// «Звёздочки» оглушения над головой актёра (игрока/неписи). Это ОТДЕЛЬНАЯ
+/// мировая `Text2d`-сущность (как всплывающий урон — такой рендер точно работает,
+/// в отличие от дочернего текста под спрайтом), которая каждый кадр следует за
+/// целью `target`, пока та оглушена; когда стан спадает или цель исчезает — гаснет.
+#[derive(Component)]
+pub struct StunStars {
+    pub target: Entity,
+}
