@@ -31,6 +31,10 @@ pub struct AbilityConfig {
     pub dash_cooldown: f32,
     pub block_establish: f32,
     pub melee_cooldown: f32,
+    /// Допуск готовности удара (сек). На КЛИЕНТЕ = 0 (строго по своему КД), на
+    /// СЕРВЕРЕ = `MELEE_CD_GRACE` — гасит ±1 тик рассинхрона двух таймеров, чтобы
+    /// предсказанный честным клиентом взмах гарантированно наносил урон.
+    pub melee_grace: f32,
     pub turn_rate: f32,         // скорость разворота к прицелу, рад/сек
     pub attack_facing_lock: f32, // заморозка разворота на время удара, сек
 }
@@ -56,6 +60,8 @@ impl Default for AbilityConfig {
             dash_cooldown: DASH_COOLDOWN,
             block_establish: BLOCK_ESTABLISH_TIME,
             melee_cooldown: MELEE_COOLDOWN,
+            // по умолчанию строго (клиент); сервер поднимает до MELEE_CD_GRACE
+            melee_grace: 0.0,
             turn_rate: TURN_RATE,
             attack_facing_lock: ATTACK_FACING_LOCK,
         }
@@ -97,22 +103,27 @@ pub struct AbilityInput {
     pub aim: f32,       // ЖЕЛАЕМЫЙ угол (курсор) — модель плавно к нему разворачивается
     pub want_dash: bool,
     pub want_block: bool,
+    pub want_attack: bool, // запрос ближнего удара на этом тике
 }
 
 /// Результат тика: эффективное движение и состояние блока.
 #[derive(Clone, Copy, Debug)]
 pub struct AbilityOutput {
-    pub move_dir: Vec2, // эффективное направление движения этого тика
-    pub speed: f32,     // эффективная скорость
-    pub blocking: bool, // блок установлен и активен
-    pub did_dash: bool, // в этот тик стартовал рывок
-    pub facing: f32,    // ТЕКУЩИЙ угол модели после разворота этого тика
+    pub move_dir: Vec2,    // эффективное направление движения этого тика
+    pub speed: f32,        // эффективная скорость
+    pub blocking: bool,    // блок установлен и активен
+    pub did_dash: bool,    // в этот тик стартовал рывок
+    pub did_attack: bool,  // в этот тик стартовал ближний удар
+    pub attack_dir: Vec2,  // направление удара (по прицелу) — для FX и резолва урона
+    pub facing: f32,       // ТЕКУЩИЙ угол модели после разворота этого тика
 }
 
 impl Abilities {
-    /// Готов ли удар (кулдаун прошёл и хватает стамины).
+    /// Готов ли удар (кулдаун прошёл — с учётом допуска `melee_grace` — и хватает
+    /// стамины). На клиенте `melee_grace == 0` (строго), на сервере он чуть больше,
+    /// чтобы погасить ±1 тик рассинхрона двух таймеров.
     pub fn melee_ready(&self, cfg: &AbilityConfig) -> bool {
-        self.melee_cd_left <= 0.0 && self.stamina >= cfg.melee_cost
+        self.melee_cd_left <= cfg.melee_grace && self.stamina >= cfg.melee_cost
     }
 
     /// Зафиксировать удар: кулдаун, стамина и заморозка разворота на время удара.
@@ -188,7 +199,9 @@ pub fn tick_abilities(
     a.attack_lock_left = (a.attack_lock_left - dt).max(0.0);
 
     // старт рывка (нельзя дважды одновременно); направление берём из текущего
-    // (ещё не довёрнутого) угла, если нет ввода движения
+    // (ещё не довёрнутого) угла, если нет ввода движения. Рывок приоритетнее
+    // удара: при удержании ЛКМ игрок всё равно может дэшнуться (иначе бы вечно
+    // «висел» в атаке и не мог уйти).
     let mut did_dash = false;
     if inp.want_dash
         && a.dash_left <= 0.0
@@ -206,6 +219,21 @@ pub fn tick_abilities(
         a.dash_cd_left = cfg.dash_cooldown;
         a.stamina = (a.stamina - cfg.dash_cost).max(0.0);
         did_dash = true;
+    }
+
+    // Ближний удар (melee) — ДИСКРЕТНОЕ событие в общем тике, симметрично рывку.
+    // Готовность (КД + стамина) проверяется и «фиксируется» В ТОМ ЖЕ тике, где
+    // тикается КД, поэтому клиент-предсказание и сервер-авторитет дают идентичный
+    // `did_attack` при одинаковом вводе — нет гонки «проверил до тика, тикнул
+    // после», из-за которой второй удар впритык к концу КД терялся. Во время
+    // рывка (вкл. только что начатого) бить нельзя. consume_melee ставит
+    // КД/стамину/заморозку разворота.
+    let mut did_attack = false;
+    let mut attack_dir = Vec2::ZERO;
+    if inp.want_attack && a.dash_left <= 0.0 && a.melee_ready(cfg) {
+        a.consume_melee(cfg);
+        did_attack = true;
+        attack_dir = Vec2::new(inp.aim.cos(), inp.aim.sin());
     }
 
     // Плавный разворот модели к прицелу. Во время рывка (вкл. только что
@@ -265,6 +293,8 @@ pub fn tick_abilities(
         speed,
         blocking,
         did_dash,
+        did_attack,
+        attack_dir,
         facing: a.facing,
     }
 }
@@ -283,6 +313,7 @@ mod tests {
             aim: 0.0,
             want_dash: dash,
             want_block: block,
+            want_attack: false,
         }
     }
 
@@ -297,6 +328,7 @@ mod tests {
             aim: 0.0,
             want_dash: false,
             want_block: false,
+            want_attack: false,
         };
         for _ in 0..1000 {
             tick_abilities(&mut a, &inp, 0.015, &cfg());
@@ -424,12 +456,67 @@ mod tests {
         assert!(a.melee_cd_left > 0.0);
     }
 
+    fn attack_at(aim: f32) -> AbilityInput {
+        AbilityInput {
+            move_dir: Vec2::ZERO,
+            aim,
+            want_dash: false,
+            want_block: false,
+            want_attack: true,
+        }
+    }
+
+    #[test]
+    fn melee_fires_through_tick_and_respects_cooldown() {
+        let cfg = cfg();
+        let mut a = Abilities::default();
+
+        // первый удар проходит сразу
+        let out = tick_abilities(&mut a, &attack_at(0.0), TICK_DT, &cfg);
+        assert!(out.did_attack, "первый удар должен пройти");
+        assert!((out.attack_dir - Vec2::new(1.0, 0.0)).length() < 1e-5);
+
+        // удержание ЛКМ: почти весь КД повторного удара быть не должно
+        let need = (cfg.melee_cooldown / TICK_DT).ceil() as i32;
+        for _ in 0..(need - 2) {
+            let o = tick_abilities(&mut a, &attack_at(0.0), TICK_DT, &cfg);
+            assert!(!o.did_attack, "во время КД удар не повторяется");
+        }
+        // в пределах нескольких ближайших тиков (граница ±1 тик из-за остатка f32)
+        // второй удар обязан пройти ровно один раз
+        let mut fired = 0;
+        for _ in 0..4 {
+            if tick_abilities(&mut a, &attack_at(0.0), TICK_DT, &cfg).did_attack {
+                fired += 1;
+            }
+        }
+        assert_eq!(fired, 1, "после КД удар снова доступен ровно один раз");
+    }
+
+    #[test]
+    fn melee_blocked_during_dash() {
+        let cfg = cfg();
+        let mut a = Abilities::default();
+        // стартуем рывок и одновременно просим удар — удар не должен пройти
+        let inp = AbilityInput {
+            move_dir: Vec2::new(1.0, 0.0),
+            aim: 0.0,
+            want_dash: true,
+            want_block: false,
+            want_attack: true,
+        };
+        let out = tick_abilities(&mut a, &inp, TICK_DT, &cfg);
+        assert!(out.did_dash);
+        assert!(!out.did_attack, "во время рывка бить нельзя");
+    }
+
     fn aim_at(aim: f32) -> AbilityInput {
         AbilityInput {
             move_dir: Vec2::ZERO,
             aim,
             want_dash: false,
             want_block: false,
+            want_attack: false,
         }
     }
 
@@ -465,6 +552,7 @@ mod tests {
                 aim: core::f32::consts::PI,
                 want_dash: false,
                 want_block: false,
+                want_attack: false,
             },
             0.016,
             &cfg(),
@@ -533,6 +621,7 @@ mod tests {
             aim: PI,
             want_dash: true,
             want_block: false,
+            want_attack: false,
         };
         let out = tick_abilities(&mut b, &inp, 0.016, &cfg());
         assert!(out.did_dash);

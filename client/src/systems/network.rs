@@ -10,7 +10,7 @@ use crate::events::{
 use crate::menu::ConnectTimeout;
 use crate::resources::grenades::{GrenadeStates, NetState};
 use crate::resources::{
-    ClientLatency, DeadPlayers, HpUiMap, LastKnownPos, LastSeen, LocalStatus,
+    ClientLatency, DeadPlayers, HpUiMap, LastKnownPos, LastSeen, LocalAbilities, LocalStatus,
     MyPlayer, PendingInputsClient, PredictedPos, RingTex, SnapshotBuffer, SpawnedPlayers, TimeSync,
     WallGridRes,
 };
@@ -59,6 +59,8 @@ pub struct NetCtx<'w, 's> {
     pub next_state: ResMut<'w, NextState<AppState>>,
     pub status: ResMut<'w, LocalStatus>,
     pub predicted: ResMut<'w, PredictedPos>,
+    /// Живое предсказание способностей локального игрока — реконсилим в нём КД удара.
+    pub abilities: ResMut<'w, LocalAbilities>,
     /// Анимации актёров по marker — чтобы запускать удар у удалённых игроков.
     pub q_anim: Query<'w, 's, (&'static PlayerMarker, &'static mut crate::components::ActorAnim)>,
 
@@ -112,11 +114,15 @@ pub fn receive_server_messages(mut client: ResMut<QuinnetClient>, mut net: NetCt
                             }
                         }
                         // переигрываем неподтверждённые вводы поверх авторитетной
-                        // позиции тем же кодом, что и предсказание/сервер
+                        // позиции тем же кодом, что и предсказание/сервер. КД удара
+                        // СИДИРУЕМ авторитетным значением из снапшота — иначе
+                        // клиентский счётчик жил бы сам по себе и расходился с
+                        // сервером (тогда предсказанный взмах мог «не нанести урон»).
                         let cfg = AbilityConfig::default();
                         let mut ab = Abilities {
                             stamina: ps.stamina,
                             facing: ps.rotation,
+                            melee_cd_left: ps.melee_cd_left,
                             ..Default::default()
                         };
                         let mut pos = Vec2::new(ps.x, ps.y);
@@ -128,6 +134,15 @@ pub fn receive_server_messages(mut client: ResMut<QuinnetClient>, mut net: NetCt
                         // не теряя ровной скорости — коррекция незаметна.
                         net.predicted.pos = pos;
                         net.predicted.valid = true;
+
+                        // Реконсилим КД удара (и стамину/заморозку) в ЖИВОЕ
+                        // предсказание: дальше send_input продолжает счёт ровно с
+                        // авторитетного значения → клиент и сервер не расходятся.
+                        // Рывок НЕ трогаем (он предсказывается клиентом и приходит
+                        // событием DashFx — снапшот его КД не несёт).
+                        net.abilities.0.melee_cd_left = ab.melee_cd_left;
+                        net.abilities.0.attack_lock_left = ab.attack_lock_left;
+                        net.abilities.0.stamina = ab.stamina;
                     }
                 }
 
@@ -487,6 +502,7 @@ fn step_pos(
             aim: inp.rotation,
             want_dash: inp.dash,
             want_block: inp.block,
+            want_attack: inp.attack,
         },
         TICK_DT,
         cfg,

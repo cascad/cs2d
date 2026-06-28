@@ -2,14 +2,14 @@ use bevy::prelude::*;
 use bevy_quinnet::server::QuinnetServer;
 use protocol::{
     combat::in_fov,
-    constants::{CH_S2C, PLAYER_SIZE, TICK_DT, VIEW_FOV_HALF_ANGLE, VIEW_RADIUS},
+    constants::{CH_S2C, MELEE_CD_GRACE, MELEE_HIT_DELAY, PLAYER_SIZE, TICK_DT, VIEW_FOV_HALF_ANGLE, VIEW_RADIUS},
     messages::{NpcSnapshot, PlayerSnapshot, WorldSnapshot, S2C},
 };
 use protocol::abilities::{tick_abilities, AbilityConfig, AbilityInput};
 use protocol::messages::InputState;
 use std::collections::HashMap;
 use crate::{
-    resources::{AppliedSeqs, NpcMode, Npcs, PendingInputs, PlayerStates, Reveals, ServerTickTimer, SnapshotHistory, WallGridRes}, utils::push_history
+    resources::{AppliedSeqs, NpcMode, Npcs, PendingInputs, PendingMelee, PendingMelees, PlayerStates, Reveals, ServerTickTimer, SnapshotHistory, WallGridRes}, utils::push_history
 };
 
 /// Эффективный ввод тика: свежий пакет (его запоминаем в `last`), иначе
@@ -29,7 +29,10 @@ pub fn effective_input(
             Some(inp.clone())
         }
         None => last.clone().map(|mut i| {
+            // на «пустом» тике (пакет не пришёл) НЕ повторяем разовые события —
+            // иначе из удержания получился бы автоповтор удара/рывка.
             i.dash = false;
+            i.attack = false;
             i
         }),
     }
@@ -47,27 +50,45 @@ pub fn server_tick(
     walls: Res<WallGridRes>, // AABB-стены для точной круговой коллизии движения
     npcs: Res<Npcs>,
     reveals: Res<Reveals>,
+    mut pending_melees: ResMut<PendingMelees>,
 ) {
     if !timer.0.tick(time.delta()).just_finished() {
         return;
     }
+    // абсолютное время для планирования резолва урона ближнего боя
+    let now = time.elapsed_secs_f64();
 
-    // Берём последний ввод каждого игрока за тик и очищаем очереди.
+    // Берём последний ввод каждого игрока за тик и очищаем очереди. Разовое
+    // событие удара (`attack`) НЕ теряем: если за один серверный тик пришло
+    // несколько пакетов, OR-им бит по всей очереди в последний ввод — иначе
+    // взмах, попавший в «промежуточный» пакет, был бы выброшен вместе с ним.
     let mut latest: HashMap<u64, InputState> = HashMap::new();
     for (&id, queue) in pending.0.iter_mut() {
-        if let Some(input) = queue.back() {
+        if let Some(back) = queue.back() {
+            let any_attack = queue.iter().any(|i| i.attack);
+            let mut input = back.clone();
+            input.attack = any_attack;
             applied.0.insert(id, input.seq);
-            latest.insert(id, input.clone());
+            latest.insert(id, input);
         }
         queue.clear();
     }
 
-    let cfg = AbilityConfig::default();
+    // СЕРВЕРНЫЙ конфиг: допуск готовности удара гасит ±1 тик рассинхрона таймеров
+    // клиента и сервера, чтобы предсказанный честным клиентом взмах всегда бил.
+    let cfg = AbilityConfig {
+        melee_grace: MELEE_CD_GRACE,
+        ..AbilityConfig::default()
+    };
     let half = PLAYER_SIZE * 0.5;
 
     // Рывки, стартовавшие в этот тик — разошлём FX после цикла (источник правды
     // о начале рывка — сервер; клиент по этому событию заводит анимацию ролла).
     let mut dash_events: Vec<(u64, Vec2)> = Vec::new();
+    // Удары, стартовавшие в этот тик: рассылаем визуальный FX и планируем урон
+    // (резолв в середине взмаха). Удар теперь — часть детерминированного тика
+    // способностей (как рывок), поэтому клиент-предсказание и сервер совпадают.
+    let mut melee_events: Vec<(u64, Vec2, Vec2)> = Vec::new();
 
     // Тикаем способности и движение ВСЕХ живых игроков (стамина/кулдауны идут
     // даже без ввода — иначе регенерация бы зависала).
@@ -81,7 +102,7 @@ pub fn server_tick(
         let input = input_owned.as_ref();
 
         let mut wish = Vec2::ZERO;
-        let (mut want_block, mut want_dash) = (false, false);
+        let (mut want_block, mut want_dash, mut want_attack) = (false, false, false);
         // по умолчанию (нет ввода) целимся в текущий угол → разворота не будет
         let mut aim = st.rot;
         if let Some(inp) = input {
@@ -91,6 +112,7 @@ pub fn server_tick(
             if inp.right { wish.x += 1.; }
             want_block = inp.block;
             want_dash = inp.dash;
+            want_attack = inp.attack;
             aim = inp.rotation; // ЖЕЛАЕМЫЙ угол; модель довернётся плавно
             st.stance = inp.stance.clone();
         }
@@ -104,6 +126,7 @@ pub fn server_tick(
                 aim,
                 want_dash,
                 want_block,
+                want_attack,
             },
             TICK_DT,
             &cfg,
@@ -113,6 +136,9 @@ pub fn server_tick(
         st.rot = out.facing;
         if out.did_dash {
             dash_events.push((_id, st.abilities.dash_dir));
+        }
+        if out.did_attack {
+            melee_events.push((_id, st.pos, out.attack_dir));
         }
 
         let delta = out.move_dir * out.speed * TICK_DT;
@@ -157,6 +183,33 @@ pub fn server_tick(
         }
     }
 
+    // Удары этого тика: планируем урон (резолв в середине взмаха, как раньше) и
+    // рассылаем визуальный FX. Локальный игрок свой взмах уже предсказал в
+    // send_input — клиент игнорирует MeleeFx с собственным id (только урон с
+    // сервера авторитетен).
+    if !melee_events.is_empty() {
+        for (pid, _from, dir) in &melee_events {
+            pending_melees.0.push(PendingMelee {
+                attacker: *pid,
+                dir: *dir,
+                resolve_at: now + MELEE_HIT_DELAY,
+            });
+        }
+        let endpoint = server.endpoint_mut();
+        for (pid, from, dir) in melee_events {
+            endpoint
+                .broadcast_message_on(
+                    CH_S2C,
+                    S2C::MeleeFx {
+                        attacker_id: pid,
+                        from,
+                        dir,
+                    },
+                )
+                .ok();
+        }
+    }
+
     let server_time = time.elapsed_secs_f64();
 
     // Полный набор снапшотов всех игроков считаем один раз.
@@ -172,6 +225,7 @@ pub fn server_tick(
             hp: st.hp,
             stamina: st.abilities.stamina,
             blocking: st.blocking,
+            melee_cd_left: st.abilities.melee_cd_left,
         })
         .collect();
 
@@ -293,6 +347,7 @@ mod tests {
             timestamp: 0.0,
             block,
             dash,
+            attack: false,
         }
     }
 

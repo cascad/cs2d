@@ -6,11 +6,10 @@ use crate::resources::{
 use crate::utils::check_hit_lag_comp;
 use bevy::prelude::*;
 use bevy_quinnet::server::QuinnetServer;
-use protocol::abilities::AbilityConfig;
 use protocol::combat::in_melee_sector;
 use protocol::constants::{
     CH_C2S, CH_S2C, GRENADE_RADIUS, GRENADE_USAGE_COOLDOWN, HITBOX_RADIUS, MAX_LAG_COMP,
-    MELEE_DAMAGE, MELEE_HALF_ANGLE, MELEE_HALF_WIDTH, MELEE_HIT_DELAY, MELEE_RANGE, NPC_RADIUS,
+    MELEE_DAMAGE, MELEE_HALF_ANGLE, MELEE_HALF_WIDTH, MELEE_RANGE, NPC_RADIUS,
     SHOOT_RIFLE_DAMAGE,
 };
 use protocol::messages::{C2S, GrenadeEvent, S2C, ShootFx};
@@ -34,7 +33,6 @@ pub fn process_c2s_messages(
     mut grenades: ResMut<Grenades>,
     mut last_grenade: ResMut<LastGrenadeThrows>,
     mut damage_events: MessageWriter<DamageEvent>,
-    mut pending_melees: ResMut<PendingMelees>,
     walls: Res<WallGridRes>,
     time: Res<Time>,
 ) {
@@ -191,48 +189,6 @@ pub fn process_c2s_messages(
                     );
 
                     info!("💣 Клиент {} бросил гранату {}", client_id, grenade_id);
-                }
-                C2S::Melee(ev) => {
-                    let cfg = AbilityConfig::default();
-
-                    // атакующий должен существовать и быть готов (кулдаун + стамина)
-                    let (from, rot, ready) = match states.0.get(&client_id) {
-                        Some(a) => (a.pos, a.rot, a.abilities.melee_ready(&cfg)),
-                        None => continue,
-                    };
-                    if !ready {
-                        continue;
-                    }
-
-                    let dir = if ev.dir.length_squared() > f32::EPSILON {
-                        ev.dir.normalize()
-                    } else {
-                        Vec2::new(rot.cos(), rot.sin())
-                    };
-
-                    // фиксируем удар (кулдаун + стамина) сразу — но УРОН наносим
-                    // позже, в середине анимации (resolve_melees). Это исключает
-                    // «мгновенный» урон по клику и даёт корректное попадание по
-                    // движущимся целям (считаем по их позициям на момент взмаха).
-                    if let Some(att) = states.0.get_mut(&client_id) {
-                        att.abilities.consume_melee(&cfg);
-                    }
-                    pending_melees.0.push(PendingMelee {
-                        attacker: client_id,
-                        dir,
-                        resolve_at: now + MELEE_HIT_DELAY,
-                    });
-
-                    endpoint
-                        .broadcast_message_on(
-                            CH_S2C,
-                            S2C::MeleeFx {
-                                attacker_id: client_id,
-                                from,
-                                dir,
-                            },
-                        )
-                        .ok();
                 }
             }
         }

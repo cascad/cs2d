@@ -10,6 +10,10 @@
 //!   'S' — точка спавна (пол под ней — камень)
 //!   ' ' — «пустота» вне уровня (ни пол, ни стена — не рендерится)
 //!
+//! Декор-пропы (бочки/сундуки/колонны) живут ОТДЕЛЬНЫМ списком ([`dungeon_props`]),
+//! а не символами карты: так пол под пропом остаётся «родным» полом комнаты, а
+//! коллизия пропа добавляется к стенам как полноразмерный тайл (см. [`active_level`]).
+//!
 //! Координаты: origin карты центрируется в (0,0), индекс тайла = floor(world/tile)
 //! — так же, как в [`crate::level`].
 
@@ -32,6 +36,16 @@ pub enum Floor {
 pub enum WallMat {
     Stone,
     Brick,
+}
+
+/// Декор-проп (стоит на полу, БЛОКИРУЕТ движение как полноразмерный тайл).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Prop {
+    Barrel,
+    Barrels,
+    BarrelsStacked,
+    Chest,
+    Column,
 }
 
 /// Разбор одной клетки карты.
@@ -71,10 +85,13 @@ pub struct ParsedLevel {
     pub origin: Vec2,
     /// Клетки в порядке (y по строкам, x по столбцам) с мировым центром.
     pub cells: Vec<(Vec2, Cell)>,
-    /// AABB стен (min,max) — для коллизии и спатиал-сетки.
+    /// AABB стен (min,max) — для коллизии и спатиал-сетки. Включает и пропы
+    /// (они блокируют движение как полноразмерный тайл).
     pub wall_aabbs: Vec<(Vec2, Vec2)>,
     /// Точки спавна (мировые центры клеток 'S').
     pub spawns: Vec<Vec2>,
+    /// Декор-пропы: мировой центр клетки + вид пропа (для отрисовки на клиенте).
+    pub props: Vec<(Vec2, Prop)>,
 }
 
 impl ParsedLevel {
@@ -83,6 +100,12 @@ impl ParsedLevel {
         let mut s = HashSet::new();
         rasterize_walls(&mut s, &self.wall_aabbs, self.tile);
         s
+    }
+
+    /// Мировой центр клетки (ix, iy) для этой карты (как в [`parse`]).
+    #[inline]
+    pub fn tile_center(&self, ix: usize, iy: usize) -> Vec2 {
+        self.origin + Vec2::new((ix as f32 + 0.5) * self.tile, (iy as f32 + 0.5) * self.tile)
     }
 }
 
@@ -116,7 +139,7 @@ pub fn parse<S: AsRef<str>>(lines: &[S], tile: f32) -> ParsedLevel {
         }
     }
 
-    ParsedLevel { width, height, tile, origin, cells, wall_aabbs, spawns }
+    ParsedLevel { width, height, tile, origin, cells, wall_aabbs, spawns, props: Vec::new() }
 }
 
 // ============================================================================
@@ -176,155 +199,210 @@ pub const ARENA_LEGACY: &[&str] = &[
     "##################################################",
 ];
 
-// ── Сетка комнат подземелья ───────────────────────────────────────────────
-// Подземелье — РЕГУЛЯРНАЯ сетка комнат COLS×ROWS, разделённых ТОНКИМИ (1 тайл)
-// стенами. Между каждой парой соседних комнат — дверь (проём), поэтому коридоров/
-// переходов много, а «глухой» скалы — минимум (то, что просили: «стены поуже,
-// коридоров побольше»). Двери центрированы по оси-центру комнат, чтобы патрульные
-// маршруты вдоль центральных рядов/столбцов шли по полу через проёмы.
-const ROOM_COLS: usize = 5;
-const ROOM_ROWS: usize = 4;
-const ROOM_W: usize = 12;
-const ROOM_H: usize = 9;
-const WALL: usize = 1; // толщина внутренних стен (тонкие!)
-const BORDER: usize = 1;
-const DUN_W: usize = BORDER * 2 + ROOM_COLS * ROOM_W + (ROOM_COLS - 1) * WALL;
-const DUN_H: usize = BORDER * 2 + ROOM_ROWS * ROOM_H + (ROOM_ROWS - 1) * WALL;
+// ── Ручная карта подземелья (ala Diablo) ──────────────────────────────────
+// Карта НЕ процедурная: 9 комнат РАЗНЫХ размеров с РАЗНЫМИ полами, соединённых
+// широкими (3 тайла) коридорами с дверными проёмами; между комнатами — ТОЛСТЫЕ
+// каменные стены (а не тонкие «заборчики», как было), поэтому стены читаются как
+// границы залов. Декор (колонны/бочки/сундуки) добавляет «обжитости».
+//
+// Карта строится вырезанием комнат/коридоров в сплошной скале — так гарантируется
+// прямоугольность и замкнутость без ручного подсчёта символов.
 
-/// Левый-верхний угол комнаты (col,row) в тайлах.
-#[inline]
-fn room_origin(col: usize, row: usize) -> (usize, usize) {
-    (BORDER + col * (ROOM_W + WALL), BORDER + row * (ROOM_H + WALL))
+const MAP_W: usize = 52;
+const MAP_H: usize = 40;
+
+/// Комната: прямоугольник [x0,x1]×[y0,y1] (включительно) с символом пола.
+struct Room {
+    x0: usize,
+    y0: usize,
+    x1: usize,
+    y1: usize,
+    floor: char,
 }
 
-/// Центр комнаты (col,row) в тайлах.
-#[inline]
-fn room_center_tile(col: usize, row: usize) -> (usize, usize) {
-    let (x0, y0) = room_origin(col, row);
-    (x0 + ROOM_W / 2, y0 + ROOM_H / 2)
+/// 9 комнат сетки 3×3 (индексы: 0=TL 1=TC 2=TR 3=ML 4=C 5=MR 6=BL 7=BC 8=BR).
+const ROOMS: [Room; 9] = [
+    Room { x0: 2, y0: 2, x1: 14, y1: 10, floor: ':' },   // 0 TL — плитка
+    Room { x0: 20, y0: 2, x1: 31, y1: 9, floor: '.' },   // 1 TC — камень
+    Room { x0: 37, y0: 2, x1: 49, y1: 11, floor: '=' },  // 2 TR — дерево
+    Room { x0: 2, y0: 15, x1: 14, y1: 25, floor: ',' },  // 3 ML — земля
+    Room { x0: 20, y0: 14, x1: 33, y1: 26, floor: '.' }, // 4 C  — большой зал, камень
+    Room { x0: 39, y0: 15, x1: 49, y1: 26, floor: '%' }, // 5 MR — щебень
+    Room { x0: 2, y0: 29, x1: 15, y1: 37, floor: '%' },  // 6 BL — щебень
+    Room { x0: 20, y0: 30, x1: 33, y1: 37, floor: ':' }, // 7 BC — плитка
+    Room { x0: 37, y0: 29, x1: 49, y1: 37, floor: ',' }, // 8 BR — земля
+];
+
+/// Центры комнат в тайлах (для спавнов НПС и путевых точек патруля). Эти линии
+/// (ряды 6/20/33 и столбцы 8/26/43-44) держим СВОБОДНЫМИ от пропов, чтобы
+/// прямые отрезки маршрута шли по полу через проёмы.
+const ROOM_CENTERS: [(usize, usize); 9] = [
+    (8, 6),   // 0 TL
+    (25, 6),  // 1 TC
+    (43, 6),  // 2 TR
+    (8, 20),  // 3 ML
+    (26, 20), // 4 C
+    (44, 20), // 5 MR
+    (8, 33),  // 6 BL
+    (26, 33), // 7 BC
+    (43, 33), // 8 BR
+];
+
+/// Коридоры: (x0,y0,x1,y1) прямоугольники-полосы (3 тайла шириной), вырезаемые
+/// камнем-полом. Каждый соединяет пару соседних комнат проёмом по их центрам.
+const CORRIDORS: [(usize, usize, usize, usize); 12] = [
+    (15, 5, 19, 7),   // TL-TC
+    (32, 5, 36, 7),   // TC-TR
+    (6, 11, 8, 14),   // TL-ML
+    (25, 10, 27, 13), // TC-C
+    (43, 12, 45, 14), // TR-MR
+    (15, 19, 19, 21), // ML-C
+    (34, 19, 38, 21), // C-MR
+    (6, 26, 8, 28),   // ML-BL
+    (25, 27, 27, 29), // C-BC
+    (43, 27, 45, 28), // MR-BR
+    (16, 33, 19, 35), // BL-BC
+    (34, 33, 36, 35), // BC-BR
+];
+
+/// Точки спавна игроков (тайлы) — по углам разнесённых комнат (не в центрах).
+const PLAYER_SPAWNS: [(usize, usize); 6] =
+    [(4, 8), (47, 4), (4, 23), (47, 17), (4, 35), (47, 35)];
+
+/// Декор-пропы карты: (тайл x, тайл y, вид). Держатся ВНЕ центральных линий
+/// маршрутов и вне спавнов (см. комментарии к [`ROOM_CENTERS`]).
+fn props_layout() -> Vec<(usize, usize, Prop)> {
+    use Prop::*;
+    vec![
+        // центральный зал C: колонны по углам + сундук и бочки
+        (22, 16, Column),
+        (31, 16, Column),
+        (22, 24, Column),
+        (31, 24, Column),
+        (23, 18, Chest),
+        (29, 17, BarrelsStacked),
+        (24, 23, Barrel),
+        // TL
+        (12, 3, Barrel),
+        (3, 9, BarrelsStacked),
+        // TC
+        (21, 3, Barrel),
+        (30, 8, Barrels),
+        // TR
+        (38, 10, Chest),
+        (48, 10, Barrels),
+        // ML
+        (12, 16, Barrel),
+        (3, 24, BarrelsStacked),
+        // MR
+        (40, 16, Barrels),
+        (48, 25, Barrel),
+        // BL
+        (3, 30, Barrel),
+        (14, 36, Chest),
+        // BC
+        (22, 31, Column),
+        (31, 31, Column),
+        (24, 36, Barrel),
+        // BR
+        (38, 30, Barrels),
+        (48, 30, Barrel),
+    ]
 }
 
-/// Тайл (ix, iy) → мировой центр клетки (как в [`parse`], origin центрирует карту).
-#[inline]
-fn tile_center_world(ix: usize, iy: usize, tile: f32) -> Vec2 {
-    let origin = Vec2::new(-(DUN_W as f32) * tile * 0.5, -(DUN_H as f32) * tile * 0.5);
-    origin + Vec2::new((ix as f32 + 0.5) * tile, (iy as f32 + 0.5) * tile)
-}
-
-/// Материал пола комнаты — разнообразим по индексу.
-fn room_floor_char(col: usize, row: usize) -> char {
-    match (col + row * ROOM_COLS) % 5 {
-        0 => '.', // камень
-        1 => ',', // земля
-        2 => '=', // дерево
-        3 => ':', // плитка
-        _ => '%', // щебень
-    }
-}
-
-/// Процедурно собирает подземелье: сетка комнат с тонкими стенами и дверями между
-/// всеми соседями (плотная сеть коридоров). Возвращает строки-сетку нашего формата.
+/// Собирает ручную карту: вырезает комнаты и коридоры в сплошной скале, ставит
+/// спавны. Возвращает строки-сетку нашего формата (ровно `MAP_W`×`MAP_H`).
 pub fn dungeon() -> Vec<String> {
-    let mut g = vec![vec!['#'; DUN_W]; DUN_H];
+    let mut g = vec![vec!['#'; MAP_W]; MAP_H];
 
     let fill = |g: &mut Vec<Vec<char>>, x0: usize, y0: usize, x1: usize, y1: usize, ch: char| {
         for y in y0..=y1 {
             for x in x0..=x1 {
-                if y < DUN_H && x < DUN_W {
+                if y < MAP_H && x < MAP_W {
                     g[y][x] = ch;
                 }
             }
         }
     };
 
-    // комнаты
-    for r in 0..ROOM_ROWS {
-        for c in 0..ROOM_COLS {
-            let (x0, y0) = room_origin(c, r);
-            fill(&mut g, x0, y0, x0 + ROOM_W - 1, y0 + ROOM_H - 1, room_floor_char(c, r));
-        }
+    // комнаты (свой пол у каждой)
+    for r in &ROOMS {
+        fill(&mut g, r.x0, r.y0, r.x1, r.y1, r.floor);
     }
-
-    // двери между соседями (центрированы → патруль вдоль центра проходит)
-    for r in 0..ROOM_ROWS {
-        for c in 0..ROOM_COLS {
-            let (cx, cy) = room_center_tile(c, r);
-            // дверь вправо
-            if c + 1 < ROOM_COLS {
-                let wall_x = room_origin(c, r).0 + ROOM_W; // столбец стены справа
-                fill(&mut g, wall_x, cy - 1, wall_x, cy + 1, '.');
-            }
-            // дверь вниз
-            if r + 1 < ROOM_ROWS {
-                let wall_y = room_origin(c, r).1 + ROOM_H; // ряд стены снизу
-                fill(&mut g, cx - 1, wall_y, cx + 1, wall_y, '.');
-            }
-        }
+    // коридоры (каменный пол)
+    for &(x0, y0, x1, y1) in &CORRIDORS {
+        fill(&mut g, x0, y0, x1, y1, '.');
     }
-
-    // редкие колонны-«мебель» (не на центральных осях, патруль не задевают)
-    for r in 0..ROOM_ROWS {
-        for c in 0..ROOM_COLS {
-            if (c + r) % 2 == 0 {
-                let (x0, y0) = room_origin(c, r);
-                g[y0 + 2][x0 + 2] = 'B';
-                g[y0 + ROOM_H - 3][x0 + ROOM_W - 3] = 'B';
-            }
-        }
-    }
-
-    // точки спавна игроков — центры разнесённых комнат
-    for &(c, r) in &[(0, 0), (4, 0), (2, 1), (0, 3), (4, 3), (2, 2)] {
-        let (cx, cy) = room_center_tile(c, r);
-        g[cy][cx] = 'S';
+    // спавны игроков
+    for &(x, y) in &PLAYER_SPAWNS {
+        g[y][x] = 'S';
     }
 
     g.into_iter().map(|row| row.into_iter().collect()).collect()
 }
 
-/// Точки спавна НЕПИСЕЙ (скелетов) — центры комнат, не совпадающие со спавнами
-/// игроков; гарантированно на полу (центр комнаты).
+/// Пропы карты (тайл x, y, вид) — отдельно от символьной сетки, чтобы пол под
+/// пропом оставался «родным» полом комнаты.
+pub fn dungeon_props() -> Vec<(usize, usize, Prop)> {
+    props_layout()
+}
+
+/// Точки спавна НЕПИСЕЙ (скелетов/зомби) — центры комнат; гарантированно на полу.
 pub fn npc_spawns(tile: f32) -> Vec<Vec2> {
-    [(1usize, 0usize), (3, 1), (0, 2), (4, 2), (1, 3), (3, 3), (2, 0)]
+    // подмножество центров комнат (центры не совпадают со спавнами игроков —
+    // те по углам).
+    [1usize, 4, 7, 3, 5, 0, 8]
         .iter()
-        .map(|&(c, r)| {
-            let (cx, cy) = room_center_tile(c, r);
-            tile_center_world(cx, cy, tile)
+        .map(|&i| {
+            let (cx, cy) = ROOM_CENTERS[i];
+            tile_to_world(cx, cy, tile)
         })
         .collect()
 }
 
 /// Патрульные маршруты НЕПИСЕЙ: последовательности мировых точек (центры комнат).
-/// Соседние точки — соседние комнаты с центрированной дверью, поэтому отрезок
-/// между ними идёт по полу через проём (без A*-поиска). Скелет ходит по маршруту
-/// «туда-обратно» (ping-pong).
+/// Соседние точки — соседние комнаты, соединённые коридором по центральной оси,
+/// поэтому прямой отрезок между ними идёт по полу через проём (без A*-поиска).
 pub fn patrol_routes(tile: f32) -> Vec<Vec<Vec2>> {
-    let to_world = |seq: &[(usize, usize)]| -> Vec<Vec2> {
+    let to_world = |seq: &[usize]| -> Vec<Vec2> {
         seq.iter()
-            .map(|&(c, r)| {
-                let (cx, cy) = room_center_tile(c, r);
-                tile_center_world(cx, cy, tile)
+            .map(|&i| {
+                let (cx, cy) = ROOM_CENTERS[i];
+                tile_to_world(cx, cy, tile)
             })
             .collect()
     };
     vec![
-        // периметр по комнатам
-        to_world(&[
-            (0, 0), (1, 0), (2, 0), (3, 0), (4, 0), (4, 1), (4, 2), (4, 3),
-            (3, 3), (2, 3), (1, 3), (0, 3), (0, 2), (0, 1),
-        ]),
-        // средние горизонтали
-        to_world(&[(0, 1), (1, 1), (2, 1), (3, 1), (4, 1)]),
-        to_world(&[(0, 2), (1, 2), (2, 2), (3, 2), (4, 2)]),
-        // центральная вертикаль
-        to_world(&[(2, 0), (2, 1), (2, 2), (2, 3)]),
+        // периметр по комнатам: TL→TC→TR→MR→BR→BC→BL→ML
+        to_world(&[0, 1, 2, 5, 8, 7, 6, 3]),
+        // вертикаль через центр: TC→C→BC
+        to_world(&[1, 4, 7]),
+        // горизонталь через центр: ML→C→MR
+        to_world(&[3, 4, 5]),
+        // диагональная связка через центр: TL→ML→C→MR→TR
+        to_world(&[0, 3, 4, 5, 2]),
     ]
 }
 
+/// Тайл (ix, iy) → мировой центр клетки активной карты (origin центрирует карту).
+#[inline]
+fn tile_to_world(ix: usize, iy: usize, tile: f32) -> Vec2 {
+    let origin = Vec2::new(-(MAP_W as f32) * tile * 0.5, -(MAP_H as f32) * tile * 0.5);
+    origin + Vec2::new((ix as f32 + 0.5) * tile, (iy as f32 + 0.5) * tile)
+}
+
 /// Активная карта уровня — единая точка выбора для клиента и сервера.
-/// Сейчас это новое подземелье; старую арену см. [`ARENA_LEGACY`].
+/// Пропы добавляются как полноразмерные тайлы-коллизии (в `wall_aabbs`) и как
+/// список для отрисовки (`props`); старую арену см. [`ARENA_LEGACY`].
 pub fn active_level(tile: f32) -> ParsedLevel {
-    parse(&dungeon(), tile)
+    let mut lvl = parse(&dungeon(), tile);
+    let half = Vec2::splat(tile * 0.5);
+    for (ix, iy, prop) in dungeon_props() {
+        let center = lvl.tile_center(ix, iy);
+        lvl.wall_aabbs.push((center - half, center + half));
+        lvl.props.push((center, prop));
+    }
+    lvl
 }
 
 #[cfg(test)]
@@ -336,32 +414,47 @@ mod tests {
     #[test]
     fn dungeon_is_rectangular() {
         let d = dungeon();
-        assert_eq!(d.len(), DUN_H);
+        assert_eq!(d.len(), MAP_H);
         for r in &d {
-            assert_eq!(r.chars().count(), DUN_W, "row: {r}");
+            assert_eq!(r.chars().count(), MAP_W, "row: {r}");
         }
     }
 
     #[test]
     fn dungeon_border_is_solid() {
         let lvl = parse(&dungeon(), TILE);
-        for (_, cell) in lvl.cells.iter().take(DUN_W) {
+        for (_, cell) in lvl.cells.iter().take(MAP_W) {
             assert!(cell.solid, "верхняя кромка должна быть стеной");
         }
-        for (_, cell) in lvl.cells.iter().skip(DUN_W * (DUN_H - 1)) {
+        for (_, cell) in lvl.cells.iter().skip(MAP_W * (MAP_H - 1)) {
             assert!(cell.solid, "нижняя кромка должна быть стеной");
         }
     }
 
     #[test]
     fn dungeon_has_six_spawns_not_in_walls() {
-        let lvl = parse(&dungeon(), TILE);
+        let lvl = active_level(TILE);
         assert_eq!(lvl.spawns.len(), 6);
         let solids = lvl.solid_tiles();
         for s in &lvl.spawns {
             let t = crate::level::world_to_tile(*s, TILE);
-            assert!(!solids.contains(&t), "спавн не должен быть в стене: {s:?}");
+            assert!(!solids.contains(&t), "спавн не должен быть в стене/пропе: {s:?}");
         }
+    }
+
+    #[test]
+    fn props_are_on_floor_and_block() {
+        // каждый проп стоит на полу (не в стене) и добавляет коллизию-тайл.
+        let lvl = active_level(TILE);
+        assert!(!lvl.props.is_empty());
+        let base = parse(&dungeon(), TILE);
+        let base_solids = base.solid_tiles();
+        for (pos, _) in &lvl.props {
+            let t = crate::level::world_to_tile(*pos, TILE);
+            assert!(!base_solids.contains(&t), "проп не должен стоять в стене: {pos:?}");
+        }
+        // с пропами сплошных тайлов БОЛЬШЕ, чем без них
+        assert!(lvl.solid_tiles().len() > base_solids.len());
     }
 
     #[test]
@@ -374,7 +467,9 @@ mod tests {
 
     #[test]
     fn npc_spawns_and_patrol_waypoints_on_floor() {
-        let lvl = parse(&dungeon(), TILE);
+        // важно: путевые точки и спавны НПС не должны попадать в стены/пропы,
+        // иначе скелет «родится в стене». Проверяем по карте С пропами.
+        let lvl = active_level(TILE);
         let solids = lvl.solid_tiles();
         for s in npc_spawns(TILE) {
             let t = crate::level::world_to_tile(s, TILE);

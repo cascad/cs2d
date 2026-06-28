@@ -33,7 +33,7 @@ use systems::{
     grenade_throw::grenade_throw,
     input::change_stance,
     interpolate_with_snapshot::interpolate_with_snapshot,
-    melee::{melee_arc_lifecycle, melee_attack},
+    melee::melee_arc_lifecycle,
     network::receive_server_messages,
     ping::send_ping,
     rotate_to_cursor::rotate_to_cursor,
@@ -224,7 +224,6 @@ fn main() {
                 rotate_to_cursor,
                 change_stance,
                 shoot_mouse,
-                melee_attack,
                 melee_arc_lifecycle,
                 send_ping,
                 // туман: перестраиваем затемнение от позиции игрока (после движения)

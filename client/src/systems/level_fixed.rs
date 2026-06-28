@@ -1,13 +1,14 @@
+use bevy::image::{ImageLoaderSettings, ImageSampler, ImageSamplerDescriptor};
 use bevy::prelude::*;
 use bevy::sprite::Anchor;
 use protocol::constants::TILE_SIZE;
 use protocol::geom::WallGrid;
-use protocol::maps::{self, WallMat};
+use protocol::maps::{self, Prop};
 
 use crate::{
     render::{depth_z, layers, world_to_screen, RenderLayer, WorldPos},
     resources::{SolidTiles, SpawnPoints, WallAabbCache, WallGridRes},
-    systems::iso::TILE_ANCHOR_Y,
+    systems::iso::{variant_index, TILE_ANCHOR_Y},
     systems::level::Wall,
 };
 
@@ -20,57 +21,112 @@ pub fn map_dims() -> (usize, usize) {
     (lvl.width, lvl.height)
 }
 
-/// Оттенок стены по материалу. Пока ассет один (`stoneWall`), кирпич отличаем
-/// тёплым тоном — заменится на собственный тайл, когда принесут визуал.
-fn wall_tint(mat: WallMat) -> Color {
-    match mat {
-        WallMat::Stone => Color::srgb(1.0, 1.0, 1.0),
-        WallMat::Brick => Color::srgb(1.0, 0.82, 0.68),
+/// Общий множитель яркости стен/пропов (тайл-ассет тёмный — осветляем тинтом).
+/// Держим в тон полу (`FLOOR_BRIGHTNESS` в `iso.rs`).
+const WALL_BRIGHTNESS: f32 = 1.15;
+
+/// Загрузчик тайлов окружения с линейным сэмплингом (как у пола) — без «лесенок»
+/// при масштабировании. Кэширует хэндлы по имени файла.
+struct EnvLoader<'a> {
+    server: &'a AssetServer,
+    cache: std::collections::HashMap<&'static str, Handle<Image>>,
+}
+impl<'a> EnvLoader<'a> {
+    fn new(server: &'a AssetServer) -> Self {
+        Self { server, cache: Default::default() }
+    }
+    fn get(&mut self, name: &'static str) -> Handle<Image> {
+        let server = self.server;
+        self.cache
+            .entry(name)
+            .or_insert_with(|| {
+                server.load_with_settings(
+                    format!("iso_env/{name}"),
+                    |s: &mut ImageLoaderSettings| {
+                        s.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor::linear());
+                    },
+                )
+            })
+            .clone()
+    }
+}
+
+/// Файл-спрайт пропа.
+fn prop_image(prop: Prop) -> &'static str {
+    match prop {
+        Prop::Barrel => "barrel_E.png",
+        Prop::Barrels => "barrels_E.png",
+        Prop::BarrelsStacked => "barrelsStacked_E.png",
+        Prop::Chest => "chestClosed_E.png",
+        Prop::Column => "stoneColumn_E.png",
     }
 }
 
 /// Построение уровня из ОБЩЕЙ карты (`protocol::maps`): считает коллизию (мир) и
-/// спавнит изо-визуал стен из пред-рендеренных тайлов kenney.
+/// спавнит изо-визуал стен и пропов из пред-рендеренных тайлов kenney.
 /// Возвращает (SolidTiles, спавны, AABB стен).
 pub fn create_fixed_level(
     commands: &mut Commands,
     asset_server: &AssetServer,
 ) -> (SolidTiles, Vec<Vec2>, Vec<(Vec2, Vec2)>) {
     let lvl = maps::active_level(TILE);
+    let (w, h) = (lvl.width, lvl.height);
+    let mut env = EnvLoader::new(asset_server);
 
-    // --- изо-визуал стен: блоки kenney `stoneWall`. На каждую стену кладём две
-    // грани, обращённые к камере (низ-лево + низ-право) — вместе они дают вид
-    // сплошного блока без автотайлинга; задние грани скрыты самим блоком. ---
-    let wall_left: Handle<Image> = asset_server.load("iso_env/stoneWall_N.png");
-    let wall_right: Handle<Image> = asset_server.load("iso_env/stoneWall_W.png");
-    // Стену делаем ВДВОЕ выше (по высоте спрайта), чтобы не выглядела заборчиком.
-    // Ширина = ширине ромба клетки (как у пола), поэтому основание совпадает с
-    // полом; растягиваем только вертикаль — верх блока поднимается выше.
-    // Якорь — доля СОДЕРЖИМОГО (основание ромба), не зависит от высоты спрайта,
-    // поэтому при растяжении вертикали основание остаётся на world_to_screen(center),
-    // а вверх блок тянется выше.
-    const WALL_HEIGHT_SCALE: f32 = 2.0;
-    let tile_size = Vec2::new(TILE * 2.0, TILE * 4.0 * WALL_HEIGHT_SCALE);
+    // решётка сплошных КЛЕТОК-СТЕН (из символьной карты; пропы сюда не входят —
+    // они на полу). Нужна, чтобы НЕ рисовать «погребённые» стены внутри толстых
+    // массивов (все 4 соседа — стены): их всё равно не видно, а отрисовка тяжелее.
+    let wall_solid: Vec<bool> = lvl.cells.iter().map(|(_, c)| c.wall.is_some()).collect();
+    let is_wall = |ix: i32, iy: i32| -> bool {
+        if ix < 0 || iy < 0 || ix >= w as i32 || iy >= h as i32 {
+            return true; // вне карты считаем «стеной»
+        }
+        wall_solid[iy as usize * w + ix as usize]
+    };
+
+    // Стену рисуем выше спрайта, чтобы блок поднимался над полом. Якорь — доля
+    // СОДЕРЖИМОГО (основание ромба), поэтому при растяжении вертикали основание
+    // остаётся на world_to_screen(center), а верх тянется выше.
+    const WALL_HEIGHT_SCALE: f32 = 1.6;
+    let wall_size = Vec2::new(TILE * 2.0, TILE * 4.0 * WALL_HEIGHT_SCALE);
     let anchor = Anchor(Vec2::new(0.0, TILE_ANCHOR_Y));
+    let tint = Color::srgb(WALL_BRIGHTNESS, WALL_BRIGHTNESS, WALL_BRIGHTNESS);
 
-    for (center, cell) in &lvl.cells {
-        let Some(mat) = cell.wall else { continue };
-        let tint = wall_tint(mat);
+    // --- стены: ПОЛНЫЙ блок (обе грани, обращённые к камере) — у блока ровный
+    // верх (топ-кап входит в спрайт), поэтому ряды стыкуются в сплошную стену без
+    // «зубцов». Рисуем только КРОМКУ массива (тайл с хотя бы одним соседом-полом):
+    // внутренние тайлы толстых стен невидимы. Часть стен «состаренные» (вариатив-
+    // ность, детерминированно по xy). Правая грань ниже, левая чуть поверх — чтобы
+    // по общему переднему ребру не было z-fight. ---
+    for (i, (center, cell)) in lvl.cells.iter().enumerate() {
+        if cell.wall.is_none() {
+            continue;
+        }
+        let (ix, iy) = ((i % w) as i32, (i / w) as i32);
+        // Пропускаем стену ТОЛЬКО если она замурована со ВСЕХ 8 сторон (включая
+        // диагонали): иначе у вогнутых углов (косяки проёмов, углы комнат) стена
+        // видна/задевается по диагонали, но не рисовалась бы — «коллизия есть,
+        // стены нет».
+        let buried = [
+            (-1, -1), (0, -1), (1, -1),
+            (-1, 0), (1, 0),
+            (-1, 1), (0, 1), (1, 1),
+        ]
+        .iter()
+        .all(|&(dx, dy)| is_wall(ix + dx, iy + dy));
+        if buried {
+            continue;
+        }
+        let aged = variant_index(ix as usize, iy as usize, 4) == 0; // ~25% «состаренных»
+        let (n_name, w_name) = if aged {
+            ("stoneWallAged_N.png", "stoneWallAged_W.png")
+        } else {
+            ("stoneWall_N.png", "stoneWall_W.png")
+        };
         let s = world_to_screen(*center);
-        // правая грань ниже, левая чуть поверх — чтобы по общему переднему ребру не
-        // было z-fight. Сдвиг кодируем в RenderLayer (его читает проекция каждый
-        // кадр; иначе z из Transform перетёрся бы). 0.01 ≪ зазора между клетками.
-        for (img, layer) in [
-            (wall_right.clone(), layers::WALL),
-            (wall_left.clone(), layers::WALL + 0.01),
-        ] {
+        for (name, layer) in [(w_name, layers::WALL), (n_name, layers::WALL + 0.01)] {
             commands.spawn((
-                Sprite {
-                    image: img,
-                    color: tint,
-                    custom_size: Some(tile_size),
-                    ..default()
-                },
+                Sprite { image: env.get(name), color: tint, custom_size: Some(wall_size), ..default() },
                 anchor,
                 Transform::from_xyz(s.x, s.y, depth_z(*center, layer)),
                 GlobalTransform::default(),
@@ -79,6 +135,27 @@ pub fn create_fixed_level(
                 Wall,
             ));
         }
+    }
+
+    // --- пропы: бочки/сундуки/колонны. Рисуем В СЛОЕ АКТЁРОВ с y-сортировкой,
+    // чтобы игрок корректно перекрывался/перекрывал предмет по глубине (за
+    // колонной — скрыт, перед ней — поверх). Коллизия уже в lvl.wall_aabbs. ---
+    let prop_size = Vec2::new(TILE * 2.0, TILE * 4.0);
+    for (center, prop) in &lvl.props {
+        let s = world_to_screen(*center);
+        commands.spawn((
+            Sprite {
+                image: env.get(prop_image(*prop)),
+                color: tint,
+                custom_size: Some(prop_size),
+                ..default()
+            },
+            anchor,
+            Transform::from_xyz(s.x, s.y, depth_z(*center, layers::ACTOR)),
+            GlobalTransform::default(),
+            WorldPos(*center),
+            RenderLayer(layers::ACTOR),
+        ));
     }
 
     (SolidTiles(lvl.solid_tiles()), lvl.spawns, lvl.wall_aabbs)

@@ -1,17 +1,10 @@
 use bevy::asset::RenderAssetUsages;
 use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
-use bevy::window::PrimaryWindow;
-use bevy_quinnet::client::QuinnetClient;
-use protocol::abilities::AbilityConfig;
 use protocol::combat::in_melee_sector;
-use protocol::constants::{CH_C2S, MELEE_HALF_ANGLE, MELEE_HALF_WIDTH, MELEE_RANGE};
-use protocol::messages::{C2S, MeleeEvent};
+use protocol::constants::{MELEE_HALF_ANGLE, MELEE_HALF_WIDTH, MELEE_RANGE};
 
-use crate::components::{ActorAnim, AnimState, LocalPlayer};
-use crate::render::{depth_z, world_to_screen, pointer_world, WorldPos};
-use crate::resources::{LocalAbilities, MyPlayer};
-use crate::systems::utils::time_in_seconds;
+use crate::render::{depth_z, world_to_screen};
 
 /// Слой декали удара: над полом/стенами (видно на земле), но ПОД актёром (рыцарь
 /// стоит поверх неё). Между CORPSE(150) и ACTOR(200).
@@ -48,55 +41,6 @@ pub fn spawn_player_melee_decal(
             timer: Timer::from_seconds(MELEE_ARC_TTL, TimerMode::Once),
         },
     ));
-}
-
-/// Ближний удар по ЛКМ (Mouse1): шлём запрос серверу, СРАЗУ запускаем анимацию
-/// удара рыцаря и рисуем на полу зону реального урона.
-pub fn melee_attack(
-    buttons: Res<ButtonInput<MouseButton>>,
-    windows: Query<&Window, With<PrimaryWindow>>,
-    cam_q: Query<(&Camera, &GlobalTransform)>,
-    mut player_q: Query<(&WorldPos, &mut ActorAnim), With<LocalPlayer>>,
-    my: Res<MyPlayer>,
-    mut abilities: ResMut<LocalAbilities>,
-    mut client: ResMut<QuinnetClient>,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<ColorMaterial>>,
-    mut commands: Commands,
-) {
-    if !buttons.pressed(MouseButton::Left) {
-        return;
-    }
-    let cfg = AbilityConfig::default();
-    if !abilities.0.melee_ready(&cfg) {
-        return;
-    }
-
-    let Ok(window) = windows.single() else { return };
-    let Ok((camera, cam_tf)) = cam_q.single() else { return };
-    let Some(world) = pointer_world(window, camera, cam_tf) else { return };
-    let Ok((wp, mut anim)) = player_q.single_mut() else { return };
-
-    let player_pos = wp.0;
-    let dir = (world - player_pos).normalize_or_zero();
-    if dir == Vec2::ZERO {
-        return;
-    }
-
-    let ev = MeleeEvent {
-        attacker_id: my.id,
-        dir,
-        timestamp: time_in_seconds(),
-    };
-    if client
-        .connection_mut()
-        .send_message_on(CH_C2S, C2S::Melee(ev))
-        .is_ok()
-    {
-        abilities.0.consume_melee(&cfg);
-        anim.start_action(AnimState::Attack);
-        spawn_player_melee_decal(&mut commands, &mut meshes, &mut materials, player_pos, dir);
-    }
 }
 
 /// Затухание и удаление декали удара.

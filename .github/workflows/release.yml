@@ -34,8 +34,12 @@ jobs:
             kind: macos-arm64
             bin_ext: ""
 
-          # macOS Intel (можно убрать, если не нужен)
-          - os: macos-13
+          # macOS Intel — КРОСС-КОМПИЛЯЦИЯ на Apple Silicon раннере.
+          # Раньше тут стоял os: macos-13 (нативный Intel-раннер), но GitHub
+          # выводит его из эксплуатации: джоба вставала в очередь навечно (раннера
+          # нет) и блокировала весь Release (release needs: build). Apple Silicon
+          # раннер собирает таргет x86_64-apple-darwin кросс-компиляцией без проблем.
+          - os: macos-14
             target: x86_64-apple-darwin
             kind: macos-x86_64
             bin_ext: ""

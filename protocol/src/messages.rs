@@ -11,7 +11,6 @@ pub enum C2S {
     Goodbye,
     Ping(f64), // отправить метку времени клиента (secs)
     ThrowGrenade(GrenadeEvent),
-    Melee(MeleeEvent),
 }
 
 // ----- Server → Client -----
@@ -94,20 +93,14 @@ pub struct InputState {
     pub rotation: f32,
     pub stance: Stance,
     pub timestamp: f64,
-    pub block: bool, // удержание блока
-    pub dash: bool,  // запрос рывка на этом тике
+    pub block: bool,  // удержание блока
+    pub dash: bool,   // запрос рывка на этом тике
+    pub attack: bool, // запрос ближнего удара на этом тике
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct ShootEvent {
     pub shooter_id: u64,
-    pub dir: Vec2,
-    pub timestamp: f64,
-}
-
-#[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct MeleeEvent {
-    pub attacker_id: u64,
     pub dir: Vec2,
     pub timestamp: f64,
 }
@@ -142,6 +135,10 @@ pub struct PlayerSnapshot {
     pub hp: i32,
     pub stamina: f32,
     pub blocking: bool,
+    /// Авторитетный кулдаун ближнего удара (сек до готовности) ЛОКАЛЬНОГО игрока.
+    /// Клиент сидирует им предсказание и реконсилит свой КД — иначе два счётчика
+    /// (клиент/сервер) расходятся на ±1 тик и второй удар «теряется».
+    pub melee_cd_left: f32,
 }
 
 /// Снапшот НЕПИСЯ (скелета) для клиента: позиция, направление, hp и состояние

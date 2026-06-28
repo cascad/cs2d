@@ -105,28 +105,43 @@ pub fn setup_iso(
         layout,
     });
 
-    // --- пол: тайл kenney `stone` на каждую НЕ-пустую клетку ОБЩЕЙ карты.
-    // Материал клетки даём оттенком (ассет пока один) — так зоны (камень/земля/
-    // дерево/плитка/щебень) визуально различимы; заменится на свои тайлы позже. ---
+    // --- пол: НАСТОЯЩИЕ тайлы kenney по материалу клетки (камень/земля/дерево/
+    // плитка/щебень). Для «диабловской» неровности у материалов с несколькими
+    // вариантами тайл выбирается детерминированным хэшем координат — рисунок пола
+    // не повторяется монотонно, но одинаков у всех клиентов. ---
     let lvl = maps::active_level(TILE);
 
-    let stone: Handle<Image> = asset_server.load_with_settings(
-        "iso_env/stone_N.png",
-        |s: &mut ImageLoaderSettings| {
-            s.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor::linear());
-        },
-    );
+    // загрузка картинок пола один раз (asset_server дедуплицирует по пути).
+    let mut cache: std::collections::HashMap<&'static str, Handle<Image>> = Default::default();
+    let mut load = |name: &'static str| -> Handle<Image> {
+        cache
+            .entry(name)
+            .or_insert_with(|| {
+                asset_server.load_with_settings(
+                    format!("iso_env/{name}"),
+                    |s: &mut ImageLoaderSettings| {
+                        s.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor::linear());
+                    },
+                )
+            })
+            .clone()
+    };
+
     // натуральный тайл kenney 256×512 → экранный ромб одной клетки (TILE*2 × TILE*4)
     let tile_size = Vec2::new(TILE * 2.0, TILE * 4.0);
     let tile_anchor = Anchor(Vec2::new(0.0, TILE_ANCHOR_Y));
+    let tint = Color::srgb(FLOOR_BRIGHTNESS, FLOOR_BRIGHTNESS, FLOOR_BRIGHTNESS);
 
-    for (center, cell) in &lvl.cells {
+    for (i, (center, cell)) in lvl.cells.iter().enumerate() {
         let Some(floor) = cell.floor else { continue };
+        let (ix, iy) = (i % lvl.width, i / lvl.width);
+        let variants = floor_variants(floor);
+        let name = variants[variant_index(ix, iy, variants.len())];
         let s = world_to_screen(*center);
         commands.spawn((
             Sprite {
-                image: stone.clone(),
-                color: floor_tint(floor),
+                image: load(name),
+                color: tint,
                 custom_size: Some(tile_size),
                 ..default()
             },
@@ -137,16 +152,40 @@ pub fn setup_iso(
     }
 }
 
-/// Оттенок пола по материалу (плейсхолдер под единственный тайл `stone`).
-fn floor_tint(floor: Floor) -> Color {
+/// Тайлы-варианты пола для материала (имена файлов в `assets/iso_env/`). Несколько
+/// вариантов → пол не выглядит монотонной плиткой (выбор — [`variant_index`]).
+fn floor_variants(floor: Floor) -> &'static [&'static str] {
     match floor {
-        Floor::Stone => Color::srgb(1.0, 1.0, 1.0),
-        Floor::Dirt => Color::srgb(0.86, 0.74, 0.56),
-        Floor::Wood => Color::srgb(0.92, 0.78, 0.55),
-        Floor::Tiles => Color::srgb(0.82, 0.88, 1.0),
-        Floor::Rubble => Color::srgb(0.7, 0.7, 0.74),
+        Floor::Stone => &["stone_N.png", "stoneTile_N.png", "stoneUneven_N.png"],
+        Floor::Dirt => &["dirt_N.png", "dirtTiles_N.png"],
+        Floor::Wood => &["planks_N.png"],
+        Floor::Tiles => &["stoneTile_N.png"],
+        Floor::Rubble => &["stoneMissingTiles_N.png", "stoneUneven_N.png"],
     }
 }
+
+/// Детерминированный выбор варианта тайла по координатам клетки (одинаков у всех
+/// клиентов). Простой хэш-микс, чтобы соседние клетки не совпадали.
+#[inline]
+pub fn variant_index(ix: usize, iy: usize, n: usize) -> usize {
+    if n <= 1 {
+        return 0;
+    }
+    let h = (ix as u32).wrapping_mul(73_856_093) ^ (iy as u32).wrapping_mul(19_349_663);
+    (h % n as u32) as usize
+}
+
+/// Общий множитель яркости пола: тайл-ассет сам по себе тёмный, поэтому
+/// осветляем тинтом (Sprite.color работает как множитель). Подними/опусти это
+/// одно число, чтобы сделать карту светлее/темнее. Держим в тон стенам
+/// (`WALL_BRIGHTNESS`) и персонажам (`ACTOR_BRIGHTNESS`), чтобы яркость была
+/// равномерной и ничего не пересвечивало.
+const FLOOR_BRIGHTNESS: f32 = 1.15;
+
+/// Множитель яркости моделей игроков (рыцарь). Тинтуется каждый кадр в
+/// `animate_actors`; держим заодно с полом/стенами, чтобы персонажи не были
+/// тёмными силуэтами на фоне светлой карты.
+pub const ACTOR_BRIGHTNESS: f32 = 1.15;
 
 /// Якорь тайлов kenney (пол/стены) по Y: точка на ромбе-основании, совмещаемая с
 /// `world_to_screen(центр клетки)`. Подобрано под лист 256×512 (верх ромба ~y364).
@@ -234,12 +273,13 @@ pub fn animate_actors(
         // «вспышка урона»: краснеем при получении урона и плавно гаснем обратно.
         // Меняем только RGB, сохраняя альфу (её ведёт fade_unseen_players).
         let a = sprite.color.alpha();
+        let b = ACTOR_BRIGHTNESS;
         if anim.hit_flash > 0.0 {
             anim.hit_flash = (anim.hit_flash - dt.as_secs_f32()).max(0.0);
             let k = (anim.hit_flash / HIT_FLASH_TIME).clamp(0.0, 1.0); // 1→0
-            sprite.color = Color::srgba(1.0, 1.0 - 0.85 * k, 1.0 - 0.85 * k, a);
+            sprite.color = Color::srgba(b, b * (1.0 - 0.85 * k), b * (1.0 - 0.85 * k), a);
         } else {
-            sprite.color = Color::srgba(1.0, 1.0, 1.0, a);
+            sprite.color = Color::srgba(b, b, b, a);
         }
     }
 }

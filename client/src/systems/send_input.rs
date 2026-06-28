@@ -1,15 +1,26 @@
-use crate::components::{ActorAnim, Facing, LocalPlayer};
+use crate::components::{ActorAnim, AnimState, Facing, LocalPlayer};
 use crate::render::WorldPos;
 use crate::resources::{
     AimAngle, CurrentStance, LocalAbilities, PendingInputsClient, PredictedPos, SendTimer,
     SeqCounter, WallGridRes,
 };
+use crate::systems::melee::spawn_player_melee_decal;
 use crate::systems::utils::time_in_seconds;
+use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use bevy_quinnet::client::QuinnetClient;
 use protocol::abilities::{tick_abilities, AbilityConfig, AbilityInput};
 use protocol::constants::{CH_C2S, PLAYER_SIZE, TICK_DT};
 use protocol::messages::{C2S, InputState};
+
+/// Ресурсы для спавна декали собственного взмаха. Упакованы в один `SystemParam`,
+/// чтобы `send_input_and_predict` не превысил лимит Bevy на 16 аргументов системы.
+#[derive(SystemParam)]
+pub struct MeleeFxCtx<'w, 's> {
+    pub commands: Commands<'w, 's>,
+    pub meshes: ResMut<'w, Assets<Mesh>>,
+    pub materials: ResMut<'w, Assets<ColorMaterial>>,
+}
 
 /// Предсказание движения локального игрока в ЛОКСТЕПЕ с отправкой ввода:
 /// симуляция шагает ровно раз в тик (как сервер), а не каждый кадр. Это убирает
@@ -30,12 +41,19 @@ pub fn send_input_and_predict(
     mut predicted: ResMut<PredictedPos>,
     aim: Res<AimAngle>,
     mut player_q: Query<(&mut Facing, &mut ActorAnim), With<LocalPlayer>>,
+    // визуал собственного взмаха (декаль на полу) предсказываем локально;
+    // commands+meshes+materials упакованы в один SystemParam, чтобы не упереться
+    // в лимит Bevy на 16 аргументов системы
+    mut fx: MeleeFxCtx,
     // накапливаем нажатие рывка между тиками, чтобы не потерять его,
     // если Space нажали не в кадр отправки
     mut dash_latch: Local<bool>,
+    // то же для удара: ЛКМ могли кликнуть не в кадр отправки
+    mut attack_latch: Local<bool>,
 ) {
     let dash_now = keys.just_pressed(KeyCode::Space);
     *dash_latch |= dash_now;
+    *attack_latch |= mouse.just_pressed(MouseButton::Left);
 
     // шагаем симуляцию строго раз в тик
     if !timer.0.tick(time.delta()).just_finished() {
@@ -72,6 +90,9 @@ pub fn send_input_and_predict(
 
     // блок — удержание mouse2
     let want_block = mouse.pressed(MouseButton::Right);
+    // удар — ЛКМ (удержание = серия ударов по готовности КД) или одиночный клик,
+    // пойманный латчем между тиками
+    let want_attack = *attack_latch || mouse.pressed(MouseButton::Left);
 
     let cfg = AbilityConfig::default();
     let out = tick_abilities(
@@ -81,6 +102,7 @@ pub fn send_input_and_predict(
             aim: aim_angle,
             want_dash: *dash_latch,
             want_block,
+            want_attack,
         },
         TICK_DT,
         &cfg,
@@ -94,6 +116,21 @@ pub fn send_input_and_predict(
     // `S2C::DashFx` от сервера (иначе при расхождении стамины/кулдауна ролл
     // иногда не проигрывался). Блок — держится, пока установлен (mouse2).
     anim.blocking = out.blocking;
+
+    // Собственный взмах предсказываем локально (отзывчивость): анимация + декаль
+    // зоны удара. Удар — часть детерминированного тика, поэтому `did_attack`
+    // совпадает с серверным; урон считает сервер, а его MeleeFx с нашим id клиент
+    // игнорирует, чтобы не дублировать визуал.
+    if out.did_attack {
+        anim.start_action(AnimState::Attack);
+        spawn_player_melee_decal(
+            &mut fx.commands,
+            &mut fx.meshes,
+            &mut fx.materials,
+            predicted.pos,
+            out.attack_dir,
+        );
+    }
 
     // Мировая скорость этого тика — её отрисовка интегрирует КАЖДЫЙ КАДР
     // (экстраполяция), поэтому движение по экрану ровное и не зависит от каденса
@@ -117,6 +154,7 @@ pub fn send_input_and_predict(
         timestamp: time_in_seconds(),
         block: want_block,
         dash: *dash_latch,
+        attack: out.did_attack,
     };
     client
         .connection_mut()
@@ -127,6 +165,7 @@ pub fn send_input_and_predict(
         pending.0.pop_front();
     }
     *dash_latch = false;
+    *attack_latch = false;
 }
 
 /// Плавно ведёт ОТРИСОВКУ локального игрока методом dead-reckoning: каждый кадр

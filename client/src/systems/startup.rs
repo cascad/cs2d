@@ -1,11 +1,15 @@
 use crate::resources::{CircleTex, RingTex, UiFont};
+use bevy::core_pipeline::tonemapping::Tonemapping;
 use bevy::image::Image;
 use bevy::prelude::*;
 use bevy::asset::RenderAssetUsages;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 
 pub fn setup(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
-    commands.spawn(Camera2d::default());
+    // Tonemapping::None — без плёночной кривой 2D-спрайты показываются «как есть»
+    // (по умолчанию тонмаппинг приглушает средние тона, из-за чего вся сцена
+    // выглядела темновато). Яркость текстур дальше регулируем тинтом-множителем.
+    commands.spawn((Camera2d, Tonemapping::None));
 
     // текстура круга для тела игрока (генерируем один раз)
     let handle = images.add(make_circle_image(64));
