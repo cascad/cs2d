@@ -6,3 +6,4 @@ pub mod cooldowns_ui;
 pub mod hp_hud;
 pub mod minimap;
 pub mod damage_flash;
+pub mod scoreboard;

@@ -25,9 +25,20 @@ pub struct ClientConfig {
     pub ip: String,
     /// UDP-порт сервера (QUIC).
     pub port: u16,
+    /// Имя аккаунта (логин) для авторизации на сервере и строки в таблице очков.
+    #[serde(default = "default_name")]
+    pub name: String,
+    /// Пароль аккаунта. При первом входе под этим именем он регистрируется,
+    /// при повторном — сверяется. Пустой пароль допустим (имя без защиты).
+    #[serde(default)]
+    pub password: String,
     /// Список серверов для мини-лобби. Каждый проверяется на активность.
     #[serde(default)]
     pub servers: Vec<ServerEntry>,
+}
+
+fn default_name() -> String {
+    "Player".to_string()
 }
 
 impl Default for ClientConfig {
@@ -35,6 +46,8 @@ impl Default for ClientConfig {
         Self {
             ip: "127.0.0.1".to_string(),
             port: 6000,
+            name: default_name(),
+            password: String::new(),
             servers: vec![ServerEntry {
                 name: Some("Локальный сервер".to_string()),
                 address: "127.0.0.1:6000".to_string(),
@@ -97,6 +110,10 @@ pub fn load_or_create() -> ClientConfig {
             let cfg = ClientConfig::default();
             let header = "# Конфиг клиента CS2D.\n\
                 # ip/port — адрес по умолчанию для строки ручного ввода в меню.\n\
+                # name/password — аккаунт для авторизации и таблицы очков. Первый\n\
+                #   вход под именем регистрирует его (с паролем), далее пароль\n\
+                #   сверяется. Пустой пароль допустим. Для нескольких клиентов на\n\
+                #   одной машине задайте разные name в отдельных конфигах.\n\
                 # [[servers]] — список серверов для мини-лобби; каждый\n\
                 #   проверяется на активность (имя/игроки берутся с сервера).\n\
                 #   Пример:\n\

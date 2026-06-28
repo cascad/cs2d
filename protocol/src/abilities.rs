@@ -113,6 +113,7 @@ pub struct AbilityOutput {
     pub speed: f32,        // эффективная скорость
     pub blocking: bool,    // блок установлен и активен
     pub did_dash: bool,    // в этот тик стартовал рывок
+    pub dash_dir: Vec2,    // направление рывка (для анимации переката) — валидно при did_dash
     pub did_attack: bool,  // в этот тик стартовал ближний удар
     pub attack_dir: Vec2,  // направление удара (по прицелу) — для FX и резолва урона
     pub facing: f32,       // ТЕКУЩИЙ угол модели после разворота этого тика
@@ -149,39 +150,6 @@ fn turn_toward(cur: f32, target: f32, max_step: f32) -> f32 {
         target
     } else {
         wrap_pi(cur + max_step * diff.signum())
-    }
-}
-
-/// Множитель скорости, который выравнивает ЭКРАННУЮ скорость во все стороны при
-/// изометрии 2:1.
-///
-/// Проблема: логика движения живёт в МИРОВЫХ координатах (квадрат), а на экран
-/// мир проецируется 2:1 (`world_to_screen`: Y сплющен вдвое). Из-за этого одна и
-/// та же мировая скорость даёт РАЗНУЮ скорость по экрану — «влево-вправо»
-/// (экранная горизонталь, мир-направление (1,−1)) в ДВА раза быстрее, чем
-/// «вверх-вниз» (экранная вертикаль, мир-направление (1,1)). Игрок видит экран,
-/// поэтому ожидает одинаковую скорость во все стороны.
-///
-/// Решение: домножаем мировую скорость на 1/|world_to_screen(dir)|. Тогда
-/// экранная скорость = заданной (одинакова по всем направлениям), а мировая
-/// скорость по направлениям меняется — это и компенсирует проекцию. Считается
-/// детерминированно, одинаково на клиенте и сервере (общий код). Возвращает 1.0
-/// при нулевом направлении.
-#[inline]
-pub fn screen_speed_norm(world_dir: Vec2) -> f32 {
-    let l2 = world_dir.length_squared();
-    if l2 < 1e-6 {
-        return 1.0;
-    }
-    let d = world_dir / l2.sqrt();
-    // экранная проекция единичного мирового направления (как `world_to_screen`)
-    let sx = (d.x - d.y) * ISO_X;
-    let sy = (d.x + d.y) * ISO_Y;
-    let len = (sx * sx + sy * sy).sqrt();
-    if len > 1e-6 {
-        1.0 / len
-    } else {
-        1.0
     }
 }
 
@@ -278,11 +246,10 @@ pub fn tick_abilities(
         (inp.move_dir, cfg.move_speed)
     };
 
-    // ВЫРАВНИВАНИЕ ЭКРАННОЙ СКОРОСТИ: домножаем мировую скорость так, чтобы по
-    // экрану движение во все стороны шло одинаково быстро (иначе при изо 2:1
-    // «влево-вправо» вдвое быстрее «вверх-вниз»). Распространяется на ходьбу,
-    // блок и рывок. Одинаково на клиенте и сервере → без рассинхрона.
-    let speed = speed * screen_speed_norm(move_dir);
+    // Скорость МОНОТОННА: одно и то же значение (`move_speed`) во все стороны в
+    // МИРОВЫХ координатах. Никакой анизотропии/выравнивания под экран — движение
+    // одинаковое по геймплею в любом направлении (детерминированно на клиенте и
+    // сервере). Изо-проекция остаётся чисто визуальной.
 
     // стамина: удержание блока ничего не стоит (расход только при попадании по
     // блоку — считается на сервере), поэтому просто восстанавливаем со временем.
@@ -293,6 +260,7 @@ pub fn tick_abilities(
         speed,
         blocking,
         did_dash,
+        dash_dir: a.dash_dir,
         did_attack,
         attack_dir,
         facing: a.facing,
@@ -341,8 +309,8 @@ mod tests {
         let mut a = Abilities::default();
         let out = tick_abilities(&mut a, &moving_right(true, false), 0.015, &cfg());
         assert!(out.did_dash);
-        // скорость рывка включает выравнивание экранной скорости для (1,0)
-        let want = DASH_SPEED * screen_speed_norm(Vec2::new(1.0, 0.0));
+        // скорость рывка одинакова во все стороны (без выравнивания под экран)
+        let want = DASH_SPEED;
         assert!((out.speed - want).abs() < 1e-3);
         assert!(a.stamina < STAMINA_MAX); // потратили
         assert!(a.dash_cd_left > 0.0); // ушёл на кулдаун
@@ -382,9 +350,9 @@ mod tests {
             out = tick_abilities(&mut a, &moving_right(false, true), 0.015, &cfg());
         }
         assert!(out.blocking, "блок держится всё время, пока зажат");
-        // скорость во время блока = медленный шаг (move_speed * block_move_mult) с
-        // выравниванием экранной скорости для направления (1,0)
-        let want = MOVE_SPEED * BLOCK_MOVE_MULT * screen_speed_norm(Vec2::new(1.0, 0.0));
+        // скорость во время блока = медленный шаг (move_speed * block_move_mult),
+        // одинаково во все стороны (без выравнивания под экран)
+        let want = MOVE_SPEED * BLOCK_MOVE_MULT;
         assert!((out.speed - want).abs() < 1e-3, "блок = шаг: {}", out.speed);
     }
 
@@ -561,39 +529,43 @@ mod tests {
             (fwd.speed - back.speed).abs() < 1e-3,
             "скорость не зависит от направления взгляда"
         );
-        let want = MOVE_SPEED * screen_speed_norm(Vec2::new(1.0, 0.0));
+        let want = MOVE_SPEED;
         assert!((fwd.speed - want).abs() < 1e-3, "обычная скорость = move_speed");
     }
 
     #[test]
-    fn screen_speed_is_uniform_across_directions() {
-        // мировая скорость, домноженная на screen_speed_norm, даёт ОДИНАКОВУЮ
-        // экранную скорость во все стороны (фикс изо 2:1: горизонталь была вдвое
-        // быстрее вертикали).
+    fn world_speed_is_uniform_across_directions() {
+        // МИРОВАЯ скорость монотонна: одинакова во все стороны и равна MOVE_SPEED
+        // (без анизотропии/выравнивания под экран).
         let dirs = [
-            Vec2::new(1.0, 1.0),   // экран: вверх
-            Vec2::new(-1.0, -1.0), // экран: вниз
-            Vec2::new(1.0, -1.0),  // экран: вправо
-            Vec2::new(-1.0, 1.0),  // экран: влево
+            Vec2::new(1.0, 1.0),
+            Vec2::new(-1.0, -1.0),
+            Vec2::new(1.0, -1.0),
+            Vec2::new(-1.0, 1.0),
             Vec2::new(1.0, 0.0),
             Vec2::new(0.0, 1.0),
         ];
-        let mut screen_speeds = Vec::new();
         for d in dirs {
             let dir = d.normalize();
-            let world_speed = MOVE_SPEED * screen_speed_norm(dir);
-            // экранная скорость = |world_to_screen(dir * world_speed)|
-            let v = dir * world_speed;
-            let sx = (v.x - v.y) * ISO_X;
-            let sy = (v.x + v.y) * ISO_Y;
-            screen_speeds.push((sx * sx + sy * sy).sqrt());
+            let mut a = Abilities::default();
+            let out = tick_abilities(
+                &mut a,
+                &AbilityInput {
+                    move_dir: dir,
+                    aim: 0.0,
+                    want_dash: false,
+                    want_block: false,
+                    want_attack: false,
+                },
+                0.016,
+                &cfg(),
+            );
+            assert!(
+                (out.speed - MOVE_SPEED).abs() < 1e-2,
+                "скорость должна быть MOVE_SPEED во все стороны: {} для {dir:?}",
+                out.speed
+            );
         }
-        let first = screen_speeds[0];
-        for s in &screen_speeds {
-            assert!((s - first).abs() < 1e-2, "экранные скорости должны совпадать: {screen_speeds:?}");
-        }
-        // и равны заданной (MOVE_SPEED)
-        assert!((first - MOVE_SPEED).abs() < 1e-2);
     }
 
     #[test]

@@ -182,5 +182,13 @@ pub struct PredictedPos {
     pub valid: bool,
 }
 
+/// Состояние авторизации: для какого client_id уже отправлен `C2S::Hello`.
+/// Привязка к id даёт авто-переотправку при реконнекте (новый id ⇒ новый Hello).
 #[derive(Resource, Default)]
-pub struct ConnectError(pub Option<String>);
+pub struct AuthState {
+    pub sent_for: Option<u64>,
+}
+
+/// Последняя полученная с сервера таблица очков (для оверлея по Tab).
+#[derive(Resource, Default)]
+pub struct ScoreboardData(pub Vec<protocol::messages::ScoreEntry>);

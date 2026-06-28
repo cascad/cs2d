@@ -14,11 +14,13 @@ pub struct DamageEvent {
     pub npc_source: Option<u32>,
 }
 
-/// Событие урона НЕПИСЮ (скелету) — от игрока (ближний бой/выстрел).
+/// Событие урона НЕПИСЮ (скелету) — от игрока (ближний бой/выстрел/граната).
 #[derive(Message)]
 pub struct NpcDamageEvent {
     pub target: u32,
     pub amount: i32,
+    /// client_id игрока-источника — кому начислить убийство неписи (если есть).
+    pub source: Option<u64>,
 }
 
 #[derive(Message)]

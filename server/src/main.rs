@@ -4,6 +4,7 @@ mod constants;
 mod events;
 mod net;
 mod resources;
+mod scoreboard;
 mod systems;
 mod utils;
 
@@ -61,6 +62,7 @@ fn main() {
         .insert_resource(RespawnDelay::default())
         .insert_resource(ConnectedClients::default())
         .insert_resource(SpawnedClients::default())
+        .insert_resource(Accounts::default())
         .insert_resource(LastGrenadeThrows::default())
         .insert_resource(GrenadeSyncTimer(Timer::from_seconds(
             TICK_DT,

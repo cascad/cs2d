@@ -4,7 +4,7 @@ pub const CH_S2C: u8 = 1;
 
 // Timing & movement constants
 pub const TICK_DT: f32 = 0.015; // 64Hz
-pub const MOVE_SPEED: f32 = 300.0;
+pub const MOVE_SPEED: f32 = 150.0; // мир. ед./сек, одинаково во все стороны (было 300)
 
 /// Стартовое/максимальное здоровье игрока (единая точка для сервера и UI).
 pub const PLAYER_MAX_HP: i32 = 100;

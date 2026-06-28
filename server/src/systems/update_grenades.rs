@@ -110,7 +110,9 @@ pub fn update_grenades(
 
             info!("💥 Grenade {} exploded at {:?}", gs.ev.id, pos);
 
-            // Урон ИГРОКАМ в радиусе (за глухой стеной не проходит).
+            // Урон ИГРОКАМ в радиусе (за глухой стеной не проходит). Источник —
+            // БРОСИВШИЙ (gs.owner), а не id гранаты: иначе киллы/подсветка
+            // привязывались бы к несуществующему «игроку» с id снаряда.
             for (&pid, pst) in states.0.iter() {
                 let dist = (pst.pos - pos).length();
                 if dist <= GRENADE_BLAST_RADIUS && !los_blocked_by_walls(pos, pst.pos, &wall_grid.0)
@@ -118,8 +120,8 @@ pub fn update_grenades(
                     damage_events.write(DamageEvent {
                         target: pid,
                         amount: blast_damage(dist),
-                        source: Some(gs.ev.id),
-                        source_pos: None,
+                        source: Some(gs.owner),
+                        source_pos: Some(pos),
                         npc_source: None,
                     });
                 }
@@ -133,6 +135,7 @@ pub fn update_grenades(
                     npc_damage_events.write(NpcDamageEvent {
                         target: nid,
                         amount: blast_damage(dist),
+                        source: Some(gs.owner),
                     });
                 }
             }

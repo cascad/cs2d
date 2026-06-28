@@ -58,6 +58,8 @@ pub struct NetCtx<'w, 's> {
     pub app_state: Res<'w, State<AppState>>,
     pub next_state: ResMut<'w, NextState<AppState>>,
     pub status: ResMut<'w, LocalStatus>,
+    pub scoreboard: ResMut<'w, crate::resources::ScoreboardData>,
+    pub connect_error: ResMut<'w, crate::menu::ConnectError>,
     pub predicted: ResMut<'w, PredictedPos>,
     /// Живое предсказание способностей локального игрока — реконсилим в нём КД удара.
     pub abilities: ResMut<'w, LocalAbilities>,
@@ -82,8 +84,33 @@ pub fn receive_server_messages(mut client: ResMut<QuinnetClient>, mut net: NetCt
         return;
     };
 
+    // Нужно ли закрыть соединение после разбора пачки сообщений (например, нас
+    // отклонила авторизация). Закрываем ПОСЛЕ цикла, когда отпущен заём `conn`.
+    let mut close_after = false;
+
     while let Some(msg) = conn.try_receive_message_on::<S2C, _>(CH_S2C) {
         match msg {
+            // ===================================================
+            // 0) АВТОРИЗАЦИЯ
+            // ===================================================
+            S2C::AuthOk { your_id } => {
+                net.my.id = your_id;
+                net.my.got = true;
+                info!("[Client] авторизация ок, мой id = {your_id}");
+            }
+            S2C::AuthDenied { reason } => {
+                warn!("[Client] авторизация отклонена: {reason}");
+                net.connect_error.0 = Some(reason);
+                // САМИ закрываем соединение (иначе фоновый приёмник quinnet будет
+                // бесконечно сыпать "Error while receiving data" в дохлый сокет) и
+                // уходим в меню с показом причины.
+                close_after = true;
+                net.next_state.set(AppState::Menu);
+            }
+            S2C::Scoreboard(entries) => {
+                net.scoreboard.0 = entries;
+            }
+
             // ===================================================
             // 1) СНАПШОТ
             // ===================================================
@@ -381,16 +408,20 @@ pub fn receive_server_messages(mut client: ResMut<QuinnetClient>, mut net: NetCt
             }
 
             S2C::DashFx { player_id, dir } => {
-                // Источник правды о рывке — сервер: ролл играем для ЛЮБОГО игрока
-                // (вкл. локального) ровно на реальный рывок, спрайт катится в `dir`.
-                let ang = if dir.length_squared() > 1e-6 {
-                    dir.y.atan2(dir.x)
-                } else {
-                    0.0
-                };
-                for (marker, mut anim) in net.q_anim.iter_mut() {
-                    if marker.0 == player_id {
-                        anim.start_action_facing(crate::components::AnimState::Dash, ang);
+                // Свой перекат уже отыгран предсказанием в send_input (тот же
+                // детерминированный `did_dash`, что и движение) — серверный DashFx с
+                // нашим id игнорируем, чтобы не дублировать/не перезапускать ролл.
+                // Для ОСТАЛЬНЫХ игроков сервер — источник правды: катим спрайт в `dir`.
+                if player_id != net.my.id {
+                    let ang = if dir.length_squared() > 1e-6 {
+                        dir.y.atan2(dir.x)
+                    } else {
+                        0.0
+                    };
+                    for (marker, mut anim) in net.q_anim.iter_mut() {
+                        if marker.0 == player_id {
+                            anim.start_action_facing(crate::components::AnimState::Dash, ang);
+                        }
                     }
                 }
             }
@@ -469,6 +500,12 @@ pub fn receive_server_messages(mut client: ResMut<QuinnetClient>, mut net: NetCt
                 }
             }
         }
+    }
+
+    // Заём `conn` отпущен (последнее использование — условие while). Теперь можно
+    // взять `client` мутабельно и закрыть соединение, если попросили выше.
+    if close_after {
+        let _ = client.close_all_connections();
     }
 }
 

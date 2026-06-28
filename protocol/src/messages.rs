@@ -5,6 +5,11 @@ use std::collections::HashMap;
 // ----- Client → Server -----
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub enum C2S {
+    /// Авторизация: имя аккаунта + пароль. Шлётся сразу после установления
+    /// соединения, ДО спавна в мире. Сервер либо регистрирует имя при первом
+    /// входе, либо проверяет пароль. До успешной авторизации остальные C2S
+    /// (Input/Shoot/…) игнорируются, а игрок не появляется на карте.
+    Hello { name: String, password: String },
     Input(InputState),
     Shoot(ShootEvent),
     Heartbeat,
@@ -16,6 +21,14 @@ pub enum C2S {
 // ----- Server → Client -----
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub enum S2C {
+    /// Авторизация прошла: сервер заспавнил игрока, `your_id` — его id в мире.
+    AuthOk { your_id: u64 },
+    /// Авторизация отклонена (неверный пароль / имя уже в игре). После этого
+    /// сервер закрывает соединение; клиент показывает причину и уходит в меню.
+    AuthDenied { reason: String },
+    /// Полная таблица очков (как в CS). Шлётся при изменениях (вход/выход/килл/
+    /// смерть). Накапливается по аккаунту и переживает реконнекты, пока жив сервер.
+    Scoreboard(Vec<ScoreEntry>),
     Snapshot(WorldSnapshot),
     ShootFx(ShootFx),
     PlayerLeft(u64),
@@ -73,6 +86,19 @@ pub enum S2C {
         facing: f32,
         kind: NpcKind,
     },
+}
+
+/// Одна строка таблицы очков. Привязана к АККАУНТУ (имени), а не к соединению,
+/// поэтому статистика сохраняется при реконнекте. `id` — текущий client_id
+/// (0, если игрок сейчас оффлайн), `online` — в игре ли он прямо сейчас.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct ScoreEntry {
+    pub id: u64,
+    pub name: String,
+    pub kills: u32,     // убийства других игроков
+    pub npc_kills: u32, // убитые непись (скелеты/зомби)
+    pub deaths: u32,    // смерти (вкл. выход из игры)
+    pub online: bool,
 }
 
 /// Тип неписи — определяет набор спрайтов на клиенте. ИИ/логика общие для всех.

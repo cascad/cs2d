@@ -5,7 +5,6 @@
 use bevy::prelude::*;
 use bevy_quinnet::server::QuinnetServer;
 use protocol::{
-    abilities::screen_speed_norm,
     constants::{
         CH_S2C, NPC_ATTACK_ANIM, NPC_ATTACK_COOLDOWN, NPC_ATTACK_DAMAGE, NPC_ATTACK_RANGE,
         NPC_CHASE_SPEED, NPC_GIVEUP_TIME, NPC_HP, NPC_RADIUS, NPC_SIGHT_RADIUS, NPC_SPEED,
@@ -18,11 +17,12 @@ use protocol::{
 use crate::{
     events::{DamageEvent, NpcDamageEvent},
     resources::{
-        Npc, NpcIdCounter, NpcMode, NpcRespawnTimer, NpcRoutes, NpcSpawnPoints, Npcs, PlayerStates,
-        WallGridRes,
+        Accounts, Npc, NpcIdCounter, NpcMode, NpcRespawnTimer, NpcRoutes, NpcSpawnPoints, Npcs,
+        PlayerStates, WallGridRes,
     },
     systems::level_fixed::TILE,
 };
+use std::collections::HashSet;
 
 /// Желаемая популяция скелетов на карте (поддерживается автоспавном).
 const NPC_TARGET_POP: usize = 5;
@@ -97,25 +97,38 @@ pub fn npc_ai(
     mut respawn: ResMut<NpcRespawnTimer>,
     mut npc_dmg: MessageReader<NpcDamageEvent>,
     mut dmg: MessageWriter<DamageEvent>,
+    mut accounts: ResMut<Accounts>,
     mut server: ResMut<QuinnetServer>,
 ) {
     let dt = time.delta_secs();
 
-    // 1) урон по неписям (от игроков) + смерти
-    let mut deaths: Vec<(u32, Vec2, f32, NpcKind)> = Vec::new();
+    // 1) урон по неписям (от игроков) + смерти. Храним и УБИЙЦУ (source), чтобы
+    // начислить ему «убитую непись». Гард `dead` не даёт задвоить смерть/килл,
+    // если по уже мёртвой непись за тот же тик прилетело ещё одно событие.
+    let mut deaths: Vec<(u32, Vec2, f32, NpcKind, Option<u64>)> = Vec::new();
+    let mut dead: HashSet<u32> = HashSet::new();
     for ev in npc_dmg.read() {
+        if dead.contains(&ev.target) {
+            continue;
+        }
         if let Some(n) = npcs.0.get_mut(&ev.target) {
             n.hp -= ev.amount;
             // агр при получении урона (даже если бил со спины)
             n.mode = NpcMode::Chase;
             n.lost_timer = 0.0;
             if n.hp <= 0 {
-                deaths.push((ev.target, n.pos, n.facing, n.kind));
+                dead.insert(ev.target);
+                deaths.push((ev.target, n.pos, n.facing, n.kind, ev.source));
             }
         }
     }
-    for (id, _, _, _) in &deaths {
+    let mut scoreboard_dirty = false;
+    for (id, _, _, _, killer) in &deaths {
         npcs.0.remove(id);
+        if let Some(src) = killer {
+            accounts.0.add_npc_kill(*src);
+            scoreboard_dirty = true;
+        }
     }
 
     // 2) живые игроки (id, позиция) для проверки видимости
@@ -198,9 +211,9 @@ pub fn npc_ai(
             let dir = to.normalize();
             n.facing = dir.y.atan2(dir.x);
             if !stop_to_attack {
-                // та же нормировка экранной скорости, что у игроков — равномерно
-                // медленно во все стороны (изо 2:1 иначе делал бы боковое быстрее).
-                let delta = dir * speed * screen_speed_norm(dir) * dt;
+                // монотонная мировая скорость, как у игроков — одинаково во все
+                // стороны (без выравнивания под экран).
+                let delta = dir * speed * dt;
                 n.pos = walls.0.slide_circle(n.pos, delta, NPC_RADIUS);
             }
         }
@@ -250,15 +263,20 @@ pub fn npc_ai(
         }
     }
 
-    // 3) рассылаем смерти (труп/анимация смерти на клиенте)
+    // 3) рассылаем смерти (труп/анимация смерти на клиенте) + таблицу очков
     if !deaths.is_empty() {
         let endpoint = server.endpoint_mut();
-        for (id, pos, facing, kind) in deaths {
+        for (id, pos, facing, kind, _killer) in deaths {
             endpoint
                 .broadcast_message_on(
                     CH_S2C,
                     S2C::NpcDied { id, x: pos.x, y: pos.y, facing, kind },
                 )
+                .ok();
+        }
+        if scoreboard_dirty {
+            endpoint
+                .broadcast_message_on(CH_S2C, S2C::Scoreboard(accounts.0.snapshot()))
                 .ok();
         }
     }

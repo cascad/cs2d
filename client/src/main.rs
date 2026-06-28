@@ -28,7 +28,7 @@ use protocol::messages::Stance;
 use resources::*;
 use systems::{
     bullet_lifecycle::bullet_lifecycle,
-    connection::handle_connection_event,
+    connection::{handle_connection_event, reset_identity, send_hello},
     grenade_lifecycle::explosion_lifecycle, // grenade_lifecycle::grenade_lifecycle,
     grenade_throw::{grenade_throw, setup_grenade_aim, update_grenade_aim},
     input::change_stance,
@@ -61,6 +61,7 @@ use crate::{
     ui::grenade_ui::setup_grenade_ui,
     ui::hp_hud::{setup_hp_hud, update_hp_hud},
     ui::minimap::{setup_minimap, toggle_minimap, update_minimap},
+    ui::scoreboard::{setup_scoreboard_ui, update_scoreboard_ui},
     ui::stamina_ui::{setup_stamina_ui, update_stamina_ui},
 };
 
@@ -126,6 +127,8 @@ fn main() {
         .insert_resource(LocalStatus::default())
         .insert_resource(PredictedPos::default())
         .insert_resource(crate::resources::Corpses::default())
+        .insert_resource(crate::resources::AuthState::default())
+        .insert_resource(crate::resources::ScoreboardData::default())
         .insert_resource(crate::systems::npc::SpawnedNpcs::default())
         .insert_resource(crate::systems::npc::NpcInfo::default())
         .insert_resource(crate::systems::npc::NpcLastSeen::default())
@@ -195,6 +198,7 @@ fn main() {
                 setup_minimap,
                 setup_melee_hint,
                 setup_grenade_aim,
+                setup_scoreboard_ui,
             ),
         )
         // --- PreUpdate: сетка/инпут и приём сообщений только в InGame ---
@@ -206,10 +210,13 @@ fn main() {
         )
         .add_systems(
             PreUpdate,
-            (ensure_my_id_from_conn, receive_server_messages)
+            (ensure_my_id_from_conn, send_hello, receive_server_messages)
                 .chain()
                 .run_if(in_state(AppState::InGame)),
         )
+        // перед каждым новым подключением сбрасываем id/Hello, чтобы реконнект
+        // заново авторизовался (и подхватил ту же статистику аккаунта на сервере)
+        .add_systems(OnEnter(AppState::Connecting), reset_identity)
         .add_systems(OnEnter(AppState::InGame), spawn_aim_marker)
         .add_systems(Update, update_aim_to_mouse.run_if(in_state(AppState::InGame)))
         // --- Update: вся игровая логика только в InGame ---
@@ -277,6 +284,7 @@ fn main() {
                 crate::systems::npc::fade_unseen_npcs,
                 update_minimap,
                 toggle_minimap,
+                update_scoreboard_ui,
             )
                 .run_if(in_state(AppState::InGame)),
         )

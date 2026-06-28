@@ -217,18 +217,10 @@ mod tests {
         assert!(hit(Vec2::new(MELEE_RANGE - 5.0, 0.0)));
         // за пределами дальности — мимо
         assert!(!hit(Vec2::new(MELEE_RANGE + 10.0, 0.0)));
-        // ~25° в сторону на дальности — внутри 60° сектора
-        let a = 25f32.to_radians();
-        assert!(hit(Vec2::new(
-            MELEE_RANGE * a.cos(),
-            MELEE_RANGE * a.sin(),
-        )));
-        // ~40° на дальности — вне 60° сектора
-        let wide = 40f32.to_radians();
-        assert!(!hit(Vec2::new(
-            MELEE_RANGE * wide.cos(),
-            MELEE_RANGE * wide.sin(),
-        )));
+        // на дальности, в пределах ширины капсулы (±half_width) — попадает
+        assert!(hit(Vec2::new(MELEE_RANGE - 2.0, MELEE_HALF_WIDTH * 0.7)));
+        // на дальности, но шире капсулы — мимо
+        assert!(!hit(Vec2::new(MELEE_RANGE - 2.0, MELEE_HALF_WIDTH + 12.0)));
         // сзади — мимо
         assert!(!hit(Vec2::new(-30.0, 0.0)));
         // вблизи сбоку: чистый конус промахнулся бы, сектор с постоянной шириной — попадает

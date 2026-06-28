@@ -10,7 +10,9 @@ use protocol::constants::DAMAGE_REVEAL_TIME;
 
 use crate::{
     events::DamageEvent,
-    resources::{PlayerStates, RespawnDelay, RespawnQueue, RespawnTask, Reveals, SpawnPoints},
+    resources::{
+        Accounts, PlayerStates, RespawnDelay, RespawnQueue, RespawnTask, Reveals, SpawnPoints,
+    },
 };
 
 pub fn apply_damage(
@@ -21,9 +23,12 @@ pub fn apply_damage(
     time: Res<Time>,
     mut server: ResMut<QuinnetServer>,
     mut reveals: ResMut<Reveals>,
+    mut accounts: ResMut<Accounts>,
     spawns: Res<SpawnPoints>,
 ) {
     let now = time.elapsed_secs_f64();
+    // нужно ли разослать обновлённую таблицу очков после обработки урона
+    let mut scoreboard_dirty = false;
     for ev in ev_damage.read() {
         // «Подсветка» атакующего жертве на DAMAGE_REVEAL_TIME: даже если удар
         // прилетел сбоку/со спины (вне поля зрения), жертва увидит источник.
@@ -102,6 +107,10 @@ pub fn apply_damage(
                 }
                 info!("💀 [Server] Player {} died", ev.target);
 
+                // 1.5) очки: жертве — смерть, убийце (если игрок и не сам) — килл.
+                accounts.0.record_player_death(ev.target, ev.source);
+                scoreboard_dirty = true;
+
                 // 2) удаляем состояние и планируем респавн
                 states.0.remove(&ev.target);
 
@@ -125,6 +134,14 @@ pub fn apply_damage(
                 );
             }
         }
+    }
+
+    // если кто-то погиб — рассылаем обновлённую таблицу очков всем
+    if scoreboard_dirty {
+        server
+            .endpoint_mut()
+            .broadcast_message_on(CH_S2C, S2C::Scoreboard(accounts.0.snapshot()))
+            .ok();
     }
 
     // чистим истёкшие «подсветки», чтобы карты не росли бесконечно

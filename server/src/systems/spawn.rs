@@ -1,6 +1,6 @@
 use crate::{
     events::{ClientConnected, ClientDisconnected, PlayerRespawn},
-    resources::{ConnectedClients, PlayerState, PlayerStates, SpawnPoints, SpawnedClients},
+    resources::{Accounts, ConnectedClients, PlayerStates, SpawnPoints, SpawnedClients},
 };
 use bevy::prelude::*;
 use bevy_quinnet::server::QuinnetServer;
@@ -24,7 +24,7 @@ use protocol::messages::S2C;
 
 
 // todo сделать рандом тут
-fn pick_spawn_point(spawns: &Res<SpawnPoints>, index_hint: u64) -> Vec2 {
+pub fn pick_spawn_point(spawns: &SpawnPoints, index_hint: u64) -> Vec2 {
     if spawns.0.is_empty() {
         return Vec2::ZERO;
     }
@@ -32,41 +32,16 @@ fn pick_spawn_point(spawns: &Res<SpawnPoints>, index_hint: u64) -> Vec2 {
     spawns.0[i]
 }
 
+/// Транспорт сообщил о новом соединении. Спавн НЕ делаем здесь — игрок появится
+/// только после успешной авторизации (`C2S::Hello`). Тут лишь отмечаем факт
+/// подключения, чтобы таймауты/учёт соединений видели клиента.
 pub fn process_client_connected(
     mut ev: MessageReader<ClientConnected>,
     mut connected: ResMut<ConnectedClients>,
-    mut spawned: ResMut<SpawnedClients>,
-    mut states: ResMut<PlayerStates>,
-    mut server: ResMut<QuinnetServer>,
-    spawns: Res<SpawnPoints>,
 ) {
     for ClientConnected(id) in ev.read() {
-        if !connected.0.insert(*id) {
-            continue;
-        }
-        let pos = pick_spawn_point(&spawns, *id);
-        states.0.insert(
-            *id,
-            PlayerState {
-                pos,
-                rot: 0.0,
-                stance: Default::default(),
-                hp: 100,
-                ..Default::default()
-            },
-        );
-        spawned.0.insert(*id);
-
-        if let Err(e) = server.endpoint_mut().broadcast_message_on(
-            CH_S2C,
-            S2C::PlayerConnected {
-                id: *id,
-                x: pos.x,
-                y: pos.y,
-            },
-        ) {
-            warn!("broadcast PlayerConnected failed: {e:?}");
-        }
+        connected.0.insert(*id);
+        info!("🔌 Соединение {id} установлено, ждём авторизацию");
     }
 }
 
@@ -75,6 +50,7 @@ pub fn process_client_disconnected(
     mut connected: ResMut<ConnectedClients>,
     mut spawned: ResMut<SpawnedClients>,
     mut states: ResMut<PlayerStates>,
+    mut accounts: ResMut<Accounts>,
     mut server: ResMut<QuinnetServer>,
 ) {
     for ClientDisconnected(id) in ev.read() {
@@ -82,11 +58,25 @@ pub fn process_client_disconnected(
         spawned.0.remove(id);
         states.0.remove(id);
 
-        if let Err(e) = server
-            .endpoint_mut()
-            .broadcast_message_on(CH_S2C, S2C::PlayerDisconnected { id: *id })
+        // Выход из игры засчитываем как СМЕРТЬ (килл никому — его никто не убил),
+        // затем отвязываем соединение, сохраняя статистику аккаунта. Гард
+        // `is_online` не даёт задвоить смерть, если придёт ещё одно событие.
+        let mut changed = false;
+        if accounts.0.is_online(*id) {
+            accounts.0.add_death(*id);
+            accounts.0.unbind(*id);
+            changed = true;
+        }
+
+        let endpoint = server.endpoint_mut();
+        if let Err(e) =
+            endpoint.broadcast_message_on(CH_S2C, S2C::PlayerDisconnected { id: *id })
         {
             warn!("broadcast PlayerDisconnected failed: {e:?}");
+        }
+        if changed {
+            let _ = endpoint
+                .broadcast_message_on(CH_S2C, S2C::Scoreboard(accounts.0.snapshot()));
         }
     }
 }

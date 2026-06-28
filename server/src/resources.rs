@@ -69,6 +69,8 @@ pub struct LastHeard(pub HashMap<u64, f64>); // client_id → time (secs)
 
 pub struct GrenadeState {
     pub ev: GrenadeEvent,
+    /// client_id бросившего — кому начислять убийства от взрыва.
+    pub owner: u64,
     pub created: f64,
     pub pos: Vec2,
     pub vel: Vec2,
@@ -102,6 +104,12 @@ pub struct RespawnTask {
 
 #[derive(Resource, Default)]
 pub struct RespawnQueue(pub Vec<RespawnTask>);
+
+/// Реестр аккаунтов и таблица очков (чистая логика в `crate::scoreboard`).
+/// Привязка к соединениям и накопление статистики живут здесь, переживают
+/// реконнекты, обнуляются на рестарте сервера.
+#[derive(Resource, Default)]
+pub struct Accounts(pub crate::scoreboard::AccountBook);
 
 #[derive(Resource, Default)]
 pub struct ConnectedClients(pub HashSet<u64>);

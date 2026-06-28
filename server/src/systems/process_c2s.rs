@@ -1,8 +1,11 @@
 use crate::events::{DamageEvent, NpcDamageEvent};
 use crate::resources::{
-    AppliedSeqs, GrenadeState, Grenades, LastGrenadeThrows, LastHeard, Npcs, PendingInputs,
-    PendingMelee, PendingMelees, PlayerStates, SnapshotHistory, WallGridRes,
+    Accounts, AppliedSeqs, GrenadeState, Grenades, LastGrenadeThrows, LastHeard, Npcs,
+    PendingInputs, PendingMelee, PendingMelees, PlayerState, PlayerStates, SnapshotHistory,
+    SpawnPoints, SpawnedClients, WallGridRes,
 };
+use crate::scoreboard::AuthOutcome;
+use crate::systems::spawn::pick_spawn_point;
 use crate::utils::check_hit_lag_comp;
 use bevy::prelude::*;
 use bevy_quinnet::server::QuinnetServer;
@@ -33,6 +36,9 @@ pub fn process_c2s_messages(
     mut grenades: ResMut<Grenades>,
     mut last_grenade: ResMut<LastGrenadeThrows>,
     mut damage_events: MessageWriter<DamageEvent>,
+    mut accounts: ResMut<Accounts>,
+    mut spawned: ResMut<SpawnedClients>,
+    spawns: Res<SpawnPoints>,
     walls: Res<WallGridRes>,
     time: Res<Time>,
 ) {
@@ -52,7 +58,89 @@ pub fn process_c2s_messages(
             // помечаем время последнего сообщения
             last_heard.0.insert(client_id, now);
 
+            // АВТОРИЗАЦИЯ-ГЕЙТ: до успешного Hello принимаем ТОЛЬКО Hello/Ping/
+            // Heartbeat/Goodbye. Игровые сообщения (Input/Shoot/Throw) от
+            // неавторизованного соединения игнорируем — играть может лишь тот,
+            // кого сервер заспавнил после проверки аккаунта.
+            let authed = accounts.0.is_online(client_id);
             match msg {
+                C2S::Hello { name, password } => {
+                    if authed {
+                        continue; // повторный Hello уже авторизованного — игнор
+                    }
+                    let outcome = accounts.0.authenticate(client_id, &name, &password);
+                    match outcome {
+                        AuthOutcome::Registered | AuthOutcome::Authenticated => {
+                            let pos = pick_spawn_point(&spawns, client_id);
+                            states.0.insert(
+                                client_id,
+                                PlayerState {
+                                    pos,
+                                    rot: 0.0,
+                                    stance: Default::default(),
+                                    hp: 100,
+                                    ..Default::default()
+                                },
+                            );
+                            spawned.0.insert(client_id);
+
+                            let disp_name = accounts
+                                .0
+                                .display_name(client_id)
+                                .unwrap_or("?")
+                                .to_string();
+                            info!("✅ {client_id} вошёл как '{disp_name}' ({outcome:?})");
+
+                            endpoint
+                                .send_message_on(
+                                    client_id,
+                                    CH_S2C,
+                                    S2C::AuthOk { your_id: client_id },
+                                )
+                                .ok();
+                            endpoint
+                                .broadcast_message_on(
+                                    CH_S2C,
+                                    S2C::PlayerConnected {
+                                        id: client_id,
+                                        x: pos.x,
+                                        y: pos.y,
+                                    },
+                                )
+                                .ok();
+                            endpoint
+                                .broadcast_message_on(
+                                    CH_S2C,
+                                    S2C::Scoreboard(accounts.0.snapshot()),
+                                )
+                                .ok();
+                        }
+                        AuthOutcome::WrongPassword | AuthOutcome::AlreadyOnline => {
+                            let reason = match outcome {
+                                AuthOutcome::WrongPassword => "Неверный пароль",
+                                _ => "Аккаунт уже в игре",
+                            };
+                            info!("⛔ {client_id} отклонён: {reason}");
+                            endpoint
+                                .send_message_on(
+                                    client_id,
+                                    CH_S2C,
+                                    S2C::AuthDenied {
+                                        reason: reason.to_string(),
+                                    },
+                                )
+                                .ok();
+                            // Соединение НЕ рвём принудительно здесь: иначе только
+                            // что поставленный в очередь AuthDenied мог бы не успеть
+                            // уйти. Клиент сам закроется по AuthDenied, а до тех пор
+                            // он всё равно ничего не может (игровые сообщения от
+                            // неавторизованного соединения игнорируются гейтом).
+                        }
+                    }
+                }
+                C2S::Input(_) | C2S::Shoot(_) | C2S::ThrowGrenade(_) if !authed => {
+                    // неавторизованное соединение: игнорируем игровые сообщения
+                }
                 C2S::Input(input) => {
                     let q = pending.0.entry(client_id).or_default();
                     q.push_back(input);
@@ -104,9 +192,23 @@ pub fn process_c2s_messages(
                     pending.0.remove(&client_id);
                     applied.0.remove(&client_id);
 
+                    // Выход = смерть без убийцы; статистику аккаунта сохраняем.
+                    let changed = if accounts.0.is_online(client_id) {
+                        accounts.0.add_death(client_id);
+                        accounts.0.unbind(client_id);
+                        true
+                    } else {
+                        false
+                    };
+
                     endpoint
                         .broadcast_message_on(CH_S2C, S2C::PlayerLeft(client_id))
                         .ok();
+                    if changed {
+                        endpoint
+                            .broadcast_message_on(CH_S2C, S2C::Scoreboard(accounts.0.snapshot()))
+                            .ok();
+                    }
 
                     info!("👋 Клиент {client_id} ушёл - broadcast PlayerLeft");
                 }
@@ -189,6 +291,7 @@ pub fn process_c2s_messages(
                         ev.id,
                         GrenadeState {
                             ev: spawn_ev.clone(),
+                            owner: client_id,
                             created: now,
                             pos: spawn_from,
                             vel: dir * GRENADE_SPEED,
@@ -274,6 +377,7 @@ pub fn resolve_melees(
                 npc_damage_events.write(NpcDamageEvent {
                     target: nid,
                     amount: MELEE_DAMAGE as i32,
+                    source: Some(m.attacker),
                 });
             }
         }
