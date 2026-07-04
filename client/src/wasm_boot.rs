@@ -370,7 +370,15 @@ fn try_wasm_connect(
 async fn fetch_digest(url: &str) -> Result<String, String> {
     use wasm_bindgen_futures::JsFuture;
     let win = web_sys::window().ok_or("нет window")?;
-    let resp_val = JsFuture::from(win.fetch_with_str(url))
+    // cache: no-store ОБЯЗАТЕЛЕН: digest меняется при каждом рестарте сервера,
+    // а обычный fetch отдаёт закэшированный файл (Ctrl+F5 страницу перегружает,
+    // но кэш для fetch() из wasm НЕ сбрасывает) — клиент коннектился со старым
+    // digest и ловил CERTIFICATE_VERIFY_FAILED до чистки кэша.
+    let opts = web_sys::RequestInit::new();
+    opts.set_cache(web_sys::RequestCache::NoStore);
+    let req = web_sys::Request::new_with_str_and_init(url, &opts)
+        .map_err(|_| "bad request".to_string())?;
+    let resp_val = JsFuture::from(win.fetch_with_request(&req))
         .await
         .map_err(|_| "fetch await failed".to_string())?;
     let resp: web_sys::Response = resp_val
