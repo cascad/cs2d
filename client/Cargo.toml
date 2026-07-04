@@ -17,10 +17,16 @@ bevy = { version = "0.18" , features = [
     "png", "x11",
     ]}
 
-bevy_quinnet = { version = "0.20.0", features = ["bincode-messages"] }
+# Сетевой стек: Lightyear 0.26 + общий протокол/симуляция из netproto.
+netproto = { path = "../netproto" }
+lightyear = { version = "0.26", features = [
+    "client",
+    "netcode",
+    "udp",
+    "input_native",
+] }
 
-# protocol нужна ТОЛЬКО фича "quinnet"
-protocol = { path = "../protocol", features = ["quinnet"] }
+protocol = { path = "../protocol" }
 
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"

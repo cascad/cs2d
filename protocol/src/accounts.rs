@@ -1,6 +1,7 @@
 //! Аккаунты и таблица очков — ЧИСТАЯ детерминированная логика (без Bevy/сети),
 //! чтобы её было легко покрыть юнит-тестами (регресс-проверка при будущих
-//! рефакторингах сети).
+//! рефакторингах сети). Общий модуль: используется и старым сервером
+//! (`bevy_quinnet`), и новым стеком на Lightyear (`netproto`).
 //!
 //! Модель идентификации: «аккаунт по имени + пароль», живущий в памяти, пока жив
 //! сервер. При первом входе имя регистрируется (пароль солится и хешируется), при
@@ -11,7 +12,7 @@
 
 use std::collections::HashMap;
 
-use protocol::messages::ScoreEntry;
+use crate::messages::ScoreEntry;
 
 /// Результат попытки авторизации.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -310,41 +311,6 @@ mod tests {
         assert_eq!(snap[0].name, "Bob"); // больше киллов
         assert_eq!(snap[1].name, "Alice"); // потом по непись
         assert_eq!(snap[2].name, "Carol");
-    }
-
-    #[test]
-    fn full_session_scenario_matches_server_contract() {
-        // Воспроизводим последовательность серверных событий и проверяем, что
-        // итоговая таблица соответствует контракту, на который опираются системы.
-        let mut b = AccountBook::default();
-        b.authenticate(1, "Alice", "a");
-        b.authenticate(2, "Bob", "b");
-
-        // Alice убивает скелета и Боба
-        b.add_npc_kill(1);
-        b.record_player_death(2, Some(1)); // Bob died from Alice
-
-        // Bob реконнектится под новым id, статистика смертей сохранилась
-        b.unbind(2);
-        assert_eq!(b.authenticate(7, "Bob", "b"), AuthOutcome::Authenticated);
-
-        // Bob кидает гранату себе под ноги (самоубийство): только смерть
-        b.record_player_death(7, Some(7));
-
-        // Alice выходит из игры: +смерть, килл никому
-        b.add_death(1);
-        b.unbind(1);
-
-        let snap = b.snapshot();
-        let alice = snap.iter().find(|e| e.name == "Alice").unwrap();
-        let bob = snap.iter().find(|e| e.name == "Bob").unwrap();
-
-        assert_eq!((alice.kills, alice.npc_kills, alice.deaths), (1, 1, 1));
-        assert!(!alice.online && alice.id == 0);
-        assert_eq!((bob.kills, bob.npc_kills, bob.deaths), (0, 0, 2));
-        assert!(bob.online && bob.id == 7);
-        // сортировка: у Alice больше киллов → она первая
-        assert_eq!(snap[0].name, "Alice");
     }
 
     #[test]

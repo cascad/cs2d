@@ -8,10 +8,15 @@ name = "server"
 path = "src/main.rs"
 
 [dependencies]
-bevy = { version = "0.18", default-features = false, features = ["bevy_asset", "bevy_render", "bevy_sprite"] }
-bevy_window = "0.18"
-bevy_quinnet = { version = "0.20.0", features = ["bincode-messages"] }
-protocol = { path = "../protocol", features = ["quinnet"] }
+bevy = { version = "0.18", default-features = false, features = ["bevy_log"] }
+netproto = { path = "../netproto" }
+lightyear = { version = "0.26", features = [
+    "server",
+    "netcode",
+    "udp",
+    "input_native",
+] }
+protocol = { path = "../protocol" }
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
 

@@ -10,8 +10,12 @@ pub struct GrenadeCooldown(pub Timer);
 impl Default for GrenadeCooldown {
     fn default() -> Self {
         // совпадает с серверным `GRENADE_USAGE_COOLDOWN`, чтобы клиентский rate-limit
-        // не расходился с авторитетным КД.
-        GrenadeCooldown(Timer::from_seconds(GRENADE_USAGE_COOLDOWN as f32, TimerMode::Once))
+        // не расходился с авторитетным КД. Стартуем «готовым»: первый бросок
+        // доступен сразу, без ожидания полного таймера.
+        let mut t = Timer::from_seconds(GRENADE_USAGE_COOLDOWN as f32, TimerMode::Once);
+        let d = t.duration();
+        t.set_elapsed(d);
+        GrenadeCooldown(t)
     }
 }
 

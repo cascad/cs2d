@@ -1,0 +1,23 @@
+[package]
+name = "netproto"
+edition = "2024"
+version = "0.1.0"
+
+# Общий сетевой слой на Lightyear 0.26 (Bevy 0.18): протокол (компоненты/инпуты/
+# каналы/сообщения) + детерминированная симуляция, переиспользуемая клиентом и
+# сервером. Постепенно заменяет самописный стек поверх bevy_quinnet.
+
+[dependencies]
+bevy = { version = "0.18", default-features = false, features = ["bevy_log"] }
+lightyear = { version = "0.26", features = [
+    "client",
+    "server",
+    "netcode",
+    "udp",
+    "input_native",
+] }
+serde = { version = "1", features = ["derive"] }
+# Переиспользуем детерминированную симуляцию и общие типы (Abilities/tick_abilities,
+# Stance, NpcKind, constants, maps, combat, geom). glam 0.30.7 совпадает с bevy 0.18,
+# поэтому glam::Vec2 == bevy::math::Vec2 — типы общие, без конвертаций.
+protocol = { path = "../protocol" }

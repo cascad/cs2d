@@ -1,101 +1,13 @@
-//! Клиентская часть тумана войны.
-//!
-//! Безопасность обеспечивается СЕРВЕРОМ (он не присылает невидимых игроков —
-//! см. `server_tick`). Здесь — только визуал поверх этого:
-//!   1. `fade_unseen_players` — плавно гасит и деспавнит тех, кого сервер
-//!      перестал присылать (вышли из зоны видимости);
-//!   2. `setup_fog`/`update_fog`/`apply_fog_tint` — «диабловское» затемнение
-//!      карты. Каждый кадр считаем LOS-конус по тайлам (видно/исследовано/не
-//!      виданное), сглаживаем темпорально, а затем УМНОЖАЕМ цвет спрайтов тайлов
-//!      (пол/стены/пропы) на яркость = 1−darkness. Тинтим сами спрайты карты —
-//!      эффект гарантированно виден (прежний оверлей-mesh не композился в этом
-//!      рендер-пути и тумана на экране не было).
+//! Клиентская часть тумана войны: затемнение карты по LOS-конусу игрока.
+//! Невидимые сущности отсекаются сервером через `NetworkVisibility` (Lightyear).
 
 use bevy::prelude::*;
 
-use crate::components::{LocalPlayer, PlayerMarker};
-use crate::resources::{HpUiMap, LastSeen, MyPlayer, SpawnedPlayers, VisionGridRes};
+use crate::components::LocalPlayer;
+use crate::resources::VisionGridRes;
 use crate::systems::level_fixed::{map_dims, TILE};
-use crate::systems::utils::time_in_seconds;
 
-// --- Мгновенное скрытие пропавших из виду ---
-// Сервер режет снапшот по полю зрения: как только цель уходит из обзора, она
-// перестаёт приходить. Показывать «фантом» после этого нельзя (по просьбе) —
-// деспавним сразу. Крошечный порог (~интерп.-задержка + 1 тик) лишь сглаживает
-// одиночный потерянный пакет, чтобы не было мерцания, но на глаз это «мгновенно».
-pub(crate) const FADE_START: f64 = 0.0;
 pub(crate) const FADE_END: f64 = 0.10;
-
-/// Гасит альфу игроков (вместе с дочерним «стволом») по времени с последнего
-/// появления в снапшоте; полностью пропавших деспавнит и снимает с учёта, чтобы
-/// при повторном появлении они заспавнились заново.
-pub fn fade_unseen_players(
-    mut commands: Commands,
-    my: Res<MyPlayer>,
-    mut last_seen: ResMut<LastSeen>,
-    mut spawned: ResMut<SpawnedPlayers>,
-    mut hp_ui: ResMut<HpUiMap>,
-    mut sets: ParamSet<(
-        Query<(Entity, &PlayerMarker, Option<&Children>)>,
-        Query<&mut Sprite>,
-    )>,
-) {
-    let now = time_in_seconds();
-
-    let mut to_set: Vec<(Entity, f32)> = Vec::new();
-    let mut to_despawn: Vec<(Entity, u64)> = Vec::new();
-    {
-        let q = sets.p0();
-        for (e, marker, children) in q.iter() {
-            if marker.0 == my.id {
-                continue; // себя не трогаем
-            }
-            let age = last_seen.0.get(&marker.0).map(|&t| now - t).unwrap_or(0.0);
-            if age >= FADE_END {
-                to_despawn.push((e, marker.0));
-                continue;
-            }
-            let alpha = if age <= FADE_START {
-                1.0
-            } else {
-                (((FADE_END - age) / (FADE_END - FADE_START)) as f32).clamp(0.0, 1.0)
-            };
-            to_set.push((e, alpha));
-            if let Some(ch) = children {
-                for c in ch.iter() {
-                    to_set.push((c, alpha));
-                }
-            }
-        }
-    }
-    {
-        let mut q = sets.p1();
-        for (e, a) in to_set {
-            if let Ok(mut s) = q.get_mut(e) {
-                s.color.set_alpha(a);
-            }
-        }
-    }
-    for (e, id) in to_despawn {
-        commands.entity(e).despawn();
-        spawned.0.remove(&id);
-        last_seen.0.remove(&id);
-        // плавающая полоска HP — ОТДЕЛЬНАЯ сущность (не ребёнок игрока): без этого
-        // она «зависала в воздухе» там, где игрок пропал из виду. Снимаем вместе.
-        if let Some(ui) = hp_ui.0.remove(&id) {
-            commands.entity(ui).despawn();
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Туман войны через ПРЯМОЙ ТИНТ спрайтов карты (пол/стены/пропы), без отдельного
-// оверлея. Раньше затемнение рисовалось текстурой на mesh поверх сцены, но в
-// этом рендер-пути overlay не композился (на экране эффекта не было). Тут мы
-// считаем «темноту» по тайлам (LOS-конус + память), а затем УМНОЖАЕМ цвет
-// каждого спрайта тайла на яркость — это гарантированно видно, т.к. меняем сами
-// спрайты, которые точно отрисовываются.
-// ---------------------------------------------------------------------------
 
 // Множитель ЯРКОСТИ = 1 - darkness. В конусе — полная яркость; вне конуса/за
 // стеной — заметно темнее (чтобы «водораздел» вижу/не-вижу читался сразу). Это

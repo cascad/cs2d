@@ -8,10 +8,6 @@ serde = { version = "1", features = ["derive"] }
 # glam должен совпадать по minor с тем, что использует bevy (0.18 → glam 0.30.x),
 # иначе glam::Vec2 в protocol ≠ bevy::math::Vec2 в клиенте/сервере.
 glam = { version = "0.30.7", features = ["serde"] }
-# Опциональная зависимость для quinnet‑адаптера
-bevy_quinnet = { version = "0.20.0", optional = true }
 
 [features]
 default = []
-# Чтобы использовать quinnet_adapter и подтянуть bevy_quinnet
-quinnet = ["bevy_quinnet"]

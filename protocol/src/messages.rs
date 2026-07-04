@@ -166,7 +166,7 @@ pub struct ShootFx {
     pub timestamp: f64,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Stance {
     Standing,
     Crouching,

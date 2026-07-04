@@ -1,129 +1,159 @@
-// todo solute this!
+//! Сервер на Lightyear 0.26 (Bevy 0.18). Авторитет — ECS-сущности с
+//! реплицируемыми компонентами протокола (`netproto`): движение/бой/способности в
+//! `FixedUpdate` через общий детерминированный шаг, NPC/гранаты/туман войны/FX и
+//! авторизация — системами `netproto`. Старый стек на `bevy_quinnet` (ручные
+//! снапшоты + HashMap-состояние) заменён целиком; мини-лобби по TCP сохранено.
+
 mod config;
-mod constants;
-mod events;
 mod net;
-mod resources;
-mod scoreboard;
-mod systems;
-mod utils;
 
-use std::time::Duration;
+use core::net::SocketAddr;
+use core::time::Duration;
+use std::sync::atomic::Ordering;
 
-use bevy::{
-    app::{ctrlc, ScheduleRunnerPlugin},
-    log::{Level, LogPlugin},
-    prelude::*,
+use bevy::app::{ScheduleRunnerPlugin, ctrlc};
+use bevy::log::LogPlugin;
+use bevy::prelude::*;
+use lightyear::netcode::NetcodeServer;
+use lightyear::prelude::server::*;
+use lightyear::prelude::*;
+
+use config::ServerConfig;
+use net::{MetaPlayerCount, start_meta_endpoint};
+use netproto::{
+    Accounts, DamageAttribution, FxOut, MapGrids, NpcGrowls, NpcRespawns, PRIVATE_KEY,
+    PROTOCOL_ID,     PendingStrikes, Player, ProtocolPlugin, ScoreboardDirty, Strikes, flush_fx,
+    broadcast_scoreboard, npc_ai, npc_growls, on_disconnect_cleanup, resolve_player_deaths,
+    respawn_npcs, respawn_players, server_handle_auth, server_simulate, spawn_grenades, spawn_npc,
+    tick_duration, update_grenades, update_interest,
 };
-use bevy_quinnet::server::{ConnectionEvent, ConnectionLostEvent, QuinnetServerPlugin};
-
-use constants::*;
-use events::*;
-use resources::*;
-use systems::{
-    connection::*, damage::*, npc::*, process_c2s::*, respawn_timers::*, server_tick::*, spawn::*,
-    startup::*, timeout::*, update_grenades::*,
-};
-
-use crate::systems::{level_fixed::setup_fixed_level, spawn::process_player_respawn};
-// use systems::{
-//     connection::{handle_disconnections, handle_new_connections},
-//     damage::{DamageEvent, apply_damage},
-//     grenades::update_grenades,
-//     process_c2s::process_c2s_messages,
-//     respawn::do_respawn,
-//     server_tick::server_tick,
-//     startup::start_server,
-//     timeout::drop_inactive,
-// };
+use protocol::maps;
+use protocol::messages::NpcKind;
 
 fn main() {
-    // graceful Ctrl-C shutdown
     ctrlc::set_handler(|| {
         println!("⚡ Server shutting down");
         std::process::exit(0);
     })
-    .expect("Error setting Ctrl‑C handler");
+    .expect("Error setting Ctrl-C handler");
 
-    App::new()
-        // конфиг (ip/port) из файла рядом с бинарём — создаётся при первом запуске
-        .insert_resource(config::load_or_create())
-        .insert_resource(ServerTickTimer(Timer::from_seconds(
-            TICK_DT,
-            TimerMode::Repeating,
-        )))
-        .insert_resource(PlayerStates::default())
-        .insert_resource(PendingInputs::default())
-        .insert_resource(AppliedSeqs::default())
-        .insert_resource(LastHeard::default())
-        .insert_resource(SnapshotHistory::default())
-        .insert_resource(Grenades::default())
-        .insert_resource(RespawnQueue::default())
-        .insert_resource(RespawnDelay::default())
-        .insert_resource(ConnectedClients::default())
-        .insert_resource(SpawnedClients::default())
-        .insert_resource(Accounts::default())
-        .insert_resource(LastGrenadeThrows::default())
-        .insert_resource(GrenadeSyncTimer(Timer::from_seconds(
-            TICK_DT,
-            TimerMode::Repeating,
-        ))) // как у снапшота игрока (~64 Гц): плавный полёт и точность при отскоках
-        .insert_resource(Npcs::default())
-        .insert_resource(NpcIdCounter::default())
-        .insert_resource(NpcRoutes::default())
-        .insert_resource(NpcSpawnPoints::default())
-        .insert_resource(NpcRespawnTimer::default())
-        .insert_resource(NpcGrowlSched::default())
-        .insert_resource(PendingMelees::default())
-        .insert_resource(PendingStuns::default())
-        .insert_resource(Reveals::default())
-        .add_plugins((
-            // Ограничиваем главный цикл частотой тика (64 Гц).
-            // Иначе ScheduleRunnerPlugin по умолчанию крутит цикл без сна и жрёт ядро на 100%.
-            MinimalPlugins.set(ScheduleRunnerPlugin::run_loop(Duration::from_secs_f32(
-                TICK_DT,
-            ))),
-            LogPlugin {
-                // лог-плагин отдельно
-                level: Level::INFO,           // показываем info
-                filter: "server=info".into(), // или "" чтобы видеть всё
-                ..Default::default()
-            },
-        ))
-        .add_plugins(QuinnetServerPlugin::default())
-        .add_message::<ConnectionEvent>() // регистрируем сообщение в ECS
-        .add_message::<ConnectionLostEvent>() // регистрируем сообщение в ECS
-        .add_message::<DamageEvent>()
-        .add_message::<NpcDamageEvent>()
-        .add_message::<ClientConnected>()
-        .add_message::<ClientDisconnected>()
-        .add_message::<PlayerRespawn>()
-        .add_systems(Startup, (start_server, setup_fixed_level, setup_npcs).chain()) // spawn_level_server
-        .add_systems(PreUpdate, (handle_new_connections, handle_disconnections))
-        .add_systems(
-            Update,
-            (
-                // todo !!!! сделать через ивент handler_disconnections !!!!!!
-                drop_inactive,        // 1. вырубаем «молчунов»
-                process_c2s_messages, // 2. обрабатываем входы (+ Heartbeat/Goodbye)
-                resolve_melees,       // 2.4 урон ближнего боя в середине взмаха
-                resolve_stuns,        // 2.45 наложение стана (удар щитом) в середине Kick
-                npc_ai,               // 2.5 ИИ скелетов (до снапшота)
-                npc_audio_growls,     // 2.6 амбиентные рыки (позиционный звук за стеной)
-                server_tick,          // 3. рассылаем снапшот
-                process_client_connected,
-                process_client_disconnected,
-                process_player_respawn,
-                process_respawn_timers,
-                apply_damage,
-                update_grenades,
-                broadcast_grenade_syncs,
-                update_meta_player_count,
-                // handle_player_died,
-                // do_respawn,
-                // purge_deaths, // todo revert???
-            )
-                .chain(),
+    let cfg = config::load_or_create();
+    // Мини-лобби (TCP) на том же порту: отдаёт имя/онлайн/лимит. Счётчик игроков
+    // обновляем из числа сущностей-игроков каждый кадр.
+    let meta = start_meta_endpoint(cfg.ip_addr(), cfg.port, cfg.name.clone(), cfg.max_players);
+
+    let mut app = App::new();
+    app.add_plugins(
+        MinimalPlugins.set(ScheduleRunnerPlugin::run_loop(tick_duration())),
+    );
+    app.add_plugins(LogPlugin {
+        level: bevy::log::Level::INFO,
+        // lightyear_udp=off: на Windows после дисконнекта клиента recv ловит
+        // WSAECONNRESET (10054) на КАЖДЫЙ пакет до таймаута netcode — сотни
+        // строк ERROR-спама в секунду без пользы (соединение и так закрывается).
+        filter: "server=info,netproto=info,lightyear_udp=off".into(),
+        ..Default::default()
+    });
+    app.add_plugins(ServerPlugins {
+        tick_duration: tick_duration(),
+    });
+    app.add_plugins(ProtocolPlugin);
+
+    app.insert_resource(cfg);
+    app.insert_resource(meta);
+    app.init_resource::<MapGrids>();
+    app.init_resource::<Strikes>();
+    app.init_resource::<PendingStrikes>();
+    app.init_resource::<DamageAttribution>();
+    app.init_resource::<Accounts>();
+    app.init_resource::<ScoreboardDirty>();
+    app.init_resource::<FxOut>();
+    app.init_resource::<NpcRespawns>();
+    app.init_resource::<NpcGrowls>();
+
+    app.add_systems(Startup, (start_server, spawn_npcs));
+    // Авторитетный тик: движение+бой → ИИ неписей → спавн гранат → физика гранат →
+    // единая точка смертей (PvP/NPC/гранаты).
+    app.add_systems(
+        FixedUpdate,
+        (
+            server_simulate,
+            npc_ai,
+            respawn_npcs,
+            npc_growls,
+            spawn_grenades,
+            update_grenades,
+            resolve_player_deaths,
+            respawn_players,
         )
-        .run();
+            .chain(),
+    );
+    // Сообщения: авторизация, таблица очков, FX; плюс счётчик игроков для лобби.
+    app.add_systems(
+        Update,
+        (
+            server_handle_auth,
+            broadcast_scoreboard,
+            flush_fx,
+            update_meta_player_count,
+        ),
+    );
+    // Туман войны: обновляем зоны интереса до буферизации репликации.
+    app.add_systems(
+        PostUpdate,
+        update_interest.before(ReplicationBufferSystems::Buffer),
+    );
+
+    app.add_observer(on_new_client);
+    app.add_observer(on_disconnect_cleanup);
+    app.run();
+}
+
+/// Поднимаем netcode-сервер на UDP-порту из конфига.
+fn start_server(mut commands: Commands, cfg: Res<ServerConfig>) {
+    let server_addr = SocketAddr::new(cfg.ip_addr(), cfg.port);
+    let entity = commands
+        .spawn((
+            Name::from("Server"),
+            NetcodeServer::new(NetcodeConfig {
+                protocol_id: PROTOCOL_ID,
+                private_key: PRIVATE_KEY,
+                ..default()
+            }),
+            LocalAddr(server_addr),
+            ServerUdpIo::default(),
+        ))
+        .id();
+    commands.trigger(Start { entity });
+    info!("server listening on udp {server_addr}");
+}
+
+/// Спавним неписей из точек спавна общей карты (чередуем скелет/зомби).
+fn spawn_npcs(mut commands: Commands) {
+    let spawns = maps::npc_spawns(netproto::TILE);
+    for (i, pos) in spawns.into_iter().enumerate() {
+        let kind = if i % 2 == 0 {
+            NpcKind::Skeleton
+        } else {
+            NpcKind::Zombie
+        };
+        spawn_npc(&mut commands, kind, pos);
+    }
+}
+
+/// Новое соединение (`ClientOf`): вешаем отправитель репликации. Спавн игрока —
+/// после авторизации (`server_handle_auth`).
+fn on_new_client(trigger: On<Add, LinkOf>, mut commands: Commands) {
+    commands.entity(trigger.entity).insert((
+        // Шлём апдейты КАЖДЫЙ тик (Duration::ZERO): частые мелкие подтверждения
+        // → маленькие окна отката у клиента → меньше «дёрганья» предсказания.
+        ReplicationSender::new(Duration::ZERO, SendUpdatesMode::SinceLastAck, false),
+        Name::from("ClientOf"),
+    ));
+    info!("link established: {:?}", trigger.entity);
+}
+
+/// Обновляем счётчик игроков для меты лобби (число сущностей-игроков).
+fn update_meta_player_count(meta: Res<MetaPlayerCount>, players: Query<(), With<Player>>) {
+    meta.0.store(players.iter().count() as u32, Ordering::Relaxed);
 }

@@ -7,6 +7,7 @@
 
 use crate::constants::*;
 use glam::Vec2;
+use serde::{Deserialize, Serialize};
 
 /// Настраиваемые параметры способностей. По умолчанию берутся из `constants`.
 #[derive(Clone, Copy, Debug)]
@@ -89,7 +90,7 @@ impl Default for AbilityConfig {
 }
 
 /// Изменяемое состояние способностей одного игрока.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Abilities {
     pub stamina: f32,
     pub dash_left: f32,   // сек до конца текущего рывка
@@ -143,9 +144,9 @@ pub struct AbilityOutput {
     pub did_dash: bool,    // в этот тик стартовал рывок
     pub dash_dir: Vec2,    // направление рывка (для анимации переката) — валидно при did_dash
     pub did_attack: bool,  // в этот тик стартовал ближний удар
-    pub attack_dir: Vec2,  // направление удара (по прицелу) — для FX и резолва урона
+    pub attack_dir: Vec2,  // направление удара (по РАЗВОРОТУ МОДЕЛИ) — для FX и резолва урона
     pub did_stun: bool,    // в этот тик стартовал удар щитом (Q)
-    pub stun_dir: Vec2,    // направление удара щитом (по прицелу) — для FX и резолва
+    pub stun_dir: Vec2,    // направление удара щитом (по РАЗВОРОТУ МОДЕЛИ) — для FX и резолва
     pub stunned: bool,     // игрок СЕЙЧАС оглушён (управление игнорируется)
     pub facing: f32,       // ТЕКУЩИЙ угол модели после разворота этого тика
 }
@@ -281,7 +282,12 @@ pub fn tick_abilities(
     if inp.want_attack && a.dash_left <= 0.0 && a.melee_ready(cfg) {
         a.consume_melee(cfg);
         did_attack = true;
-        attack_dir = Vec2::new(inp.aim.cos(), inp.aim.sin());
+        // Удар идёт ТУДА, КУДА РАЗВЁРНУТА МОДЕЛЬ (a.facing), а не в курсор:
+        // подсветка зоны удара на клиенте строится по развороту модели, и
+        // «что обведено — то и бьёт». Модель доворачивается к курсору с
+        // конечной скоростью (turn_rate), поэтому резкий фликшот мимо разворота
+        // уходит в молоко — это осознанная механика.
+        attack_dir = Vec2::new(a.facing.cos(), a.facing.sin());
     }
 
     // Удар щитом (stun, Q) — ещё одно дискретное событие. Взаимоисключим с melee
@@ -297,12 +303,15 @@ pub fn tick_abilities(
     {
         a.consume_stun(cfg);
         did_stun = true;
-        stun_dir = Vec2::new(inp.aim.cos(), inp.aim.sin());
+        // как и melee: удар щитом идёт по развороту МОДЕЛИ, не по курсору
+        stun_dir = Vec2::new(a.facing.cos(), a.facing.sin());
     }
 
-    // Плавный разворот модели к прицелу. Во время рывка (вкл. только что
-    // начатого) или удара разворот ЗАМОРОЖЕН — одинаково на клиенте и сервере.
-    let facing_locked = a.dash_left > 0.0 || a.attack_lock_left > 0.0;
+    // Плавный разворот модели к прицелу. Во время удара разворот ЗАМОРОЖЕН
+    // (одинаково на клиенте и сервере). Во время рывка разворот РАЗРЕШЁН:
+    // траектория рывка задана dash_dir и не меняется, но прицел/взгляд игрок
+    // доворачивает свободно — по выходу из рывка он уже смотрит куда целится.
+    let facing_locked = a.attack_lock_left > 0.0;
     if !facing_locked {
         a.facing = turn_toward(a.facing, inp.aim, cfg.turn_rate * dt);
     }
@@ -781,7 +790,7 @@ mod tests {
     }
 
     #[test]
-    fn melee_and_dash_freeze_facing() {
+    fn melee_freezes_facing_but_dash_allows_turning() {
         use core::f32::consts::PI;
         // удар морозит разворот
         let mut a = Abilities::default();
@@ -789,7 +798,8 @@ mod tests {
         let out = tick_abilities(&mut a, &aim_at(PI), 0.016, &cfg());
         assert_eq!(out.facing, 0.0, "во время удара модель не разворачивается");
 
-        // рывок тоже морозит разворот
+        // рывок разворот НЕ морозит: траектория фиксирована dash_dir, но прицел
+        // доворачивается свободно
         let mut b = Abilities::default();
         let inp = AbilityInput {
             move_dir: Vec2::new(1.0, 0.0),
@@ -801,6 +811,11 @@ mod tests {
         };
         let out = tick_abilities(&mut b, &inp, 0.016, &cfg());
         assert!(out.did_dash);
-        assert_eq!(out.facing, 0.0, "во время рывка модель не разворачивается");
+        assert!(
+            out.facing.abs() > 1e-6,
+            "во время рывка взгляд доворачивается к прицелу"
+        );
+        // а траектория рывка при этом не меняется от прицела
+        assert_eq!(out.move_dir, Vec2::new(1.0, 0.0));
     }
 }

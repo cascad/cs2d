@@ -362,6 +362,7 @@ pub fn play_combat_sfx(
             CombatSfxKind::Swing => (&sfx.swing, SWING_VOLUME),
             CombatSfxKind::StunBash => (&sfx.stun, STUN_VOLUME),
             CombatSfxKind::Dash => (&sfx.dash, DASH_VOLUME),
+            CombatSfxKind::Blocked => (&sfx.block, BLOCK_VOLUME),
         };
         if let Some(v) = dist_volume(e.pos, lpos, COMBAT_HEAR_RADIUS, base) {
             play_random(&mut commands, pool, &mut rng, v);

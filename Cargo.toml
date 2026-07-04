@@ -3,6 +3,7 @@ members = [
     "protocol",
     "server",
     "client",
+    "netproto",
 ]
 resolver = "2"  # свежий алгоритм feature‑unification
 

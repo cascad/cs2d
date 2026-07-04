@@ -4,17 +4,14 @@
 //! (анимация смерти) по событию `NpcDied`. ИИ/логика общие; тип неписи (`NpcKind`)
 //! задаёт лишь набор спрайтов и размер/якорь модели. Источник правды — сервер.
 
-use bevy::asset::RenderAssetUsages;
-use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
 use std::collections::HashMap;
 
 use crate::components::{Facing, NpcAnim, NpcHpFill, NpcKindC, NpcMarker};
 use crate::render::{depth_z, layers, world_to_screen, world_to_translation, RenderLayer, WorldPos};
-use crate::resources::{SnapshotBuffer, TimeSync};
 use crate::systems::melee::{make_iso_circle_mesh, MeleeArc, MELEE_ARC_TTL, MELEE_DECAL_LAYER};
-use crate::systems::utils::{hp_color, lerp_angle, time_in_seconds};
-use protocol::constants::{NPC_ATTACK_RANGE, NPC_HP};
+use crate::systems::utils::hp_color;
+use protocol::constants::{NPC_ATTACK_ANIM, NPC_ATTACK_RANGE, NPC_HP};
 use protocol::messages::NpcKind;
 
 /// Папки направлений в порядке экранных секторов: 0=E,1=NE,2=N,3=NW,4=W,5=SW,6=S,7=SE.
@@ -22,18 +19,15 @@ const DIR_NAMES: [&str; 8] = ["E", "NE", "N", "NW", "W", "SW", "S", "SE"];
 const NPC_FRAMES: usize = 8;
 const NPC_DIRS: usize = 8;
 
+/// Длительность кадра зацикленных клипов неписи (ходьба/покой), сек.
+const NPC_LOOP_FRAME_TIME: f32 = 0.1;
+
 /// Высота полоски HP над неписью (экранные px над точкой ног).
 const NPC_HP_Y: f32 = 75.0;
 
 /// Полоска HP неписи.
 const NPC_HP_W: f32 = 40.0;
 const NPC_HP_H: f32 = 5.0;
-
-/// Время до деспавна неписи, пропавшей из снапшота: «потерял из виду — сразу
-/// убрали». Единый порог с игроками (см. `fog::FADE_END`), чтобы непись и её
-/// полоска HP не «зависали в воздухе». Крошечный — лишь сглаживает одиночный
-/// потерянный пакет, на глаз это мгновенно.
-use crate::systems::fog::FADE_END;
 
 /// Визуальные параметры конкретного типа неписи: папка ассетов, экранный размер
 /// квадрата спрайта, вертикальный якорь (доля кадра: где «ноги» относительно
@@ -99,25 +93,41 @@ impl NpcAnims {
     }
 }
 
-/// id неписи → сущность (для обновления/деспавна).
-#[derive(Resource, Default)]
-pub struct SpawnedNpcs(pub HashMap<u32, Entity>);
-
-/// id неписи → (hp, aggro, attacking) из последнего снапшота — для полоски HP,
-/// подсветки агра и проигрывания анимации атаки.
+/// id неписи → (hp, aggro, attacking) из реплики — для полоски HP и анимации атаки.
 #[derive(Resource, Default)]
 pub struct NpcInfo(pub HashMap<u32, (i32, bool, bool)>);
 
-/// id неписи → время последнего появления в снапшоте (для угасания/деспавна).
-#[derive(Resource, Default)]
-pub struct NpcLastSeen(pub HashMap<u32, f64>);
-
-/// id неписи → остаток оглушения (сек) из снапшота. Используется системой
-/// «звёздочек» над оглушёнными неписями.
+/// id неписи → остаток оглушения (сек) из реплики.
 #[derive(Resource, Default)]
 pub struct NpcStun(pub HashMap<u32, f32>);
 
-/// Экранный 8-сектор из мирового угла (0=E..7=SE) — тем же способом, что и рыцарь.
+/// Радиус привязки FX-события к ближайшей неписи на экране.
+pub const NPC_FX_MATCH_RADIUS: f32 = 96.0;
+
+/// Запускает локальный клип атаки (не ждём `NpcRuntime.attacking` с сервера).
+pub fn trigger_npc_attack(anim: &mut NpcAnim) {
+    anim.attack_left = NPC_ATTACK_ANIM;
+    anim.frame = 0;
+    anim.timer.reset();
+}
+
+/// Ближайшая непись к точке FX (атака/смерть) с её направлением взгляда.
+pub fn nearest_npc(
+    pos: Vec2,
+    q: &Query<(Entity, &WorldPos, &Facing), With<NpcMarker>>,
+) -> Option<(Entity, f32)> {
+    let r2 = NPC_FX_MATCH_RADIUS * NPC_FX_MATCH_RADIUS;
+    q.iter()
+        .filter(|(_, wp, _)| wp.0.distance_squared(pos) <= r2)
+        .min_by(|(_, a, _), (_, b, _)| {
+            a.0
+                .distance_squared(pos)
+                .partial_cmp(&b.0.distance_squared(pos))
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .map(|(e, _, f)| (e, f.0))
+}
+
 #[inline]
 pub fn npc_dir(facing_world: f32) -> usize {
     let s = world_to_screen(Vec2::new(facing_world.cos(), facing_world.sin()));
@@ -153,126 +163,10 @@ pub fn setup_npc_anims(mut commands: Commands, asset_server: Res<AssetServer>) {
     commands.insert_resource(NpcAnims { skeleton, zombie });
 }
 
-/// Спавн сущности неписи (тело + полоска HP над головой).
-fn spawn_npc_entity(
-    commands: &mut Commands,
-    anims: &NpcAnims,
-    kind: NpcKind,
-    id: u32,
-    pos: Vec2,
-    facing: f32,
-) -> Entity {
-    let vis = npc_visual(kind);
-    let dir = npc_dir(facing);
-    commands
-        .spawn((
-            Sprite {
-                image: anims.get(kind).walk[dir][0].clone(),
-                color: vis.base,
-                custom_size: Some(Vec2::splat(vis.px)),
-                ..default()
-            },
-            bevy::sprite::Anchor(Vec2::new(0.0, vis.anchor_y)),
-            Transform::from_translation(world_to_translation(pos, layers::ACTOR)),
-            GlobalTransform::default(),
-            WorldPos(pos),
-            RenderLayer(layers::ACTOR),
-            NpcMarker(id),
-            NpcKindC(kind),
-            Facing(facing),
-            NpcAnim::default(),
-            Name::new(format!("Npc {id} ({:?})", kind)),
-        ))
-        .with_children(|p| {
-            p.spawn((
-                Sprite {
-                    color: Color::srgba(0.0, 0.0, 0.0, 0.65),
-                    custom_size: Some(Vec2::new(NPC_HP_W + 2.0, NPC_HP_H + 2.0)),
-                    ..default()
-                },
-                Transform::from_xyz(0.0, NPC_HP_Y, 0.05),
-            ));
-            p.spawn((
-                Sprite {
-                    color: hp_color(1.0),
-                    custom_size: Some(Vec2::new(NPC_HP_W, NPC_HP_H)),
-                    ..default()
-                },
-                bevy::sprite::Anchor(Vec2::new(-0.5, 0.0)),
-                Transform::from_xyz(-NPC_HP_W * 0.5, NPC_HP_Y, 0.06),
-                NpcHpFill { id, full_w: NPC_HP_W },
-            ));
-        })
-        .id()
-}
-
-/// Применяет снапшот неписей: спавнит новых, помечает «видели», пишет hp/aggro.
-pub fn apply_npc_snapshot(
-    mut commands: Commands,
-    buffer: Res<SnapshotBuffer>,
-    anims: Option<Res<NpcAnims>>,
-    mut spawned: ResMut<SpawnedNpcs>,
-    mut info: ResMut<NpcInfo>,
-    mut last_seen: ResMut<NpcLastSeen>,
-    mut npc_stun: ResMut<NpcStun>,
-) {
-    let Some(anims) = anims else { return };
-    let Some(snap) = buffer.snapshots.back() else { return };
-    let now = time_in_seconds();
-    for n in &snap.npcs {
-        last_seen.0.insert(n.id, now);
-        info.0.insert(n.id, (n.hp, n.aggro, n.attacking));
-        npc_stun.0.insert(n.id, n.stun_left);
-        if !spawned.0.contains_key(&n.id) {
-            let e =
-                spawn_npc_entity(&mut commands, &anims, n.kind, n.id, Vec2::new(n.x, n.y), n.facing);
-            spawned.0.insert(n.id, e);
-        }
-    }
-}
-
-/// Интерполяция позиции/направления скелетов из буфера снапшотов (как у игроков).
-pub fn interpolate_npcs(
-    mut q: Query<(&mut WorldPos, &mut Facing, &NpcMarker)>,
-    buffer: Res<SnapshotBuffer>,
-    time_sync: Res<TimeSync>,
-) {
-    if buffer.snapshots.len() < 2 {
-        return;
-    }
-    let now_s = time_in_seconds() - time_sync.offset;
-    let rt = now_s - buffer.delay;
-    let (mut prev, mut next) = (None, None);
-    for snap in buffer.snapshots.iter() {
-        if snap.server_time <= rt {
-            prev = Some(snap);
-        } else {
-            next = Some(snap);
-            break;
-        }
-    }
-    let (prev, next) = match (prev, next) {
-        (Some(p), Some(n)) => (p, n),
-        (Some(p), None) => (p, p),
-        _ => return,
-    };
-    let t0 = prev.server_time;
-    let t1 = next.server_time.max(t0 + 1e-4);
-    let alpha = ((rt - t0) / (t1 - t0)).clamp(0.0, 1.0) as f32;
-    let mut pmap = HashMap::new();
-    for n in &prev.npcs {
-        pmap.insert(n.id, n);
-    }
-    let mut nmap = HashMap::new();
-    for n in &next.npcs {
-        nmap.insert(n.id, n);
-    }
-    for (mut wp, mut facing, marker) in q.iter_mut() {
-        if let (Some(a), Some(b)) = (pmap.get(&marker.0), nmap.get(&marker.0)) {
-            wp.0 = Vec2::new(a.x, a.y).lerp(Vec2::new(b.x, b.y), alpha);
-            facing.0 = lerp_angle(a.facing, b.facing, alpha);
-        }
-    }
+/// Экранный размер и якорь спрайта неписи (для моста lynet).
+pub fn npc_sprite_layout(kind: NpcKind) -> (f32, f32) {
+    let v = npc_visual(kind);
+    (v.px, v.anchor_y)
 }
 
 /// Покадровая анимация ходьбы неписи + подсветка агра.
@@ -290,44 +184,101 @@ pub fn animate_skeletons(
     )>,
 ) {
     let Some(anims) = anims else { return };
-    let dt = time.delta();
-    // порог «идёт» по перемещению за кадр (мир. ед.) — иначе считаем, что стоит
-    const NPC_WALK_EPS: f32 = 0.15;
+    let dt = time.delta_secs();
+    // порог «идёт» по сглаженной СКОРОСТИ (мир. ед./сек): NPC_SPEED=38, поэтому
+    // 12 отсекает сетевой шум, но ловит даже медленный патруль.
+    const NPC_WALK_EPS_SPEED: f32 = 12.0;
+    // время сглаживания скорости (сек): гасит дребезг walk↔idle от снапшотов.
+    const MOVE_EMA_TAU: f32 = 0.12;
     for (wp, facing, kind, mut anim, mut sprite, marker) in q.iter_mut() {
-        let moving = (wp.0 - anim.prev).length() > NPC_WALK_EPS;
+        let step = (wp.0 - anim.prev).length();
         anim.prev = wp.0;
+        if dt > 0.0 {
+            let k = (dt / MOVE_EMA_TAU).clamp(0.0, 1.0);
+            anim.move_ema = anim.move_ema * (1.0 - k) + (step / dt) * k;
+        }
+        let moving = anim.move_ema > NPC_WALK_EPS_SPEED;
+
         let (aggro, attacking) = info
             .0
             .get(&marker.0)
             .map(|(_, a, atk)| (*a, *atk))
             .unwrap_or((false, false));
 
+        // фронт реплики — запасной триггер, основной — FX NpcSound::Attack
+        if attacking {
+            anim.attack_left = anim.attack_left.max(NPC_ATTACK_ANIM * 0.35);
+        }
+
         let vis = npc_visual(kind.0);
         let dir = npc_dir(facing.0);
         let set = anims.get(kind.0);
 
-        // выбор клипа по приоритету: атака → ходьба → покой. Атака и покой всегда
-        // проигрываются (зацикленно), ходьба — только когда непись реально идёт.
-        let (frames, advancing) = if attacking && set.attack.is_some() {
-            (set.attack.as_ref().unwrap(), true)
+        // (кадры, крутить ли таймер, одноразовый ли клип — без зацикливания)
+        let (frames, advancing, oneshot) = if anim.attack_left > 0.0 {
+            anim.attack_left = (anim.attack_left - dt).max(0.0);
+            if let Some(atk) = set.attack.as_ref() {
+                (atk, true, true)
+            } else {
+                // у скелета нет клипа атаки — короткий проход кадров ходьбы
+                (&set.walk, true, true)
+            }
         } else if moving {
-            (&set.walk, true)
+            (&set.walk, true, false)
         } else if let Some(idle) = set.idle.as_ref() {
-            (idle, true)
+            (idle, true, false)
         } else {
-            // у скелета нет покоя — стоим на кадре 0 ходьбы (без «марша на месте»)
-            (&set.walk, false)
+            // у скелета нет покоя — стоим на кадре 0 ходьбы
+            (&set.walk, false, false)
         };
 
+        // Тайминг кадров: клип АТАКИ укладывается РОВНО в окно NPC_ATTACK_ANIM
+        // (все 8 кадров за 0.7с — замах виден целиком, а середина клипа совпадает
+        // с моментом урона NPC_HIT_DELAY на сервере); ходьба/покой — LOOP-частота.
+        let want_secs = if oneshot {
+            NPC_ATTACK_ANIM / NPC_FRAMES as f32
+        } else {
+            NPC_LOOP_FRAME_TIME
+        };
+        if (anim.timer.duration().as_secs_f32() - want_secs).abs() > 1e-4 {
+            anim.timer
+                .set_duration(std::time::Duration::from_secs_f32(want_secs));
+        }
+
         if advancing {
-            if anim.timer.tick(dt).just_finished() {
-                anim.frame = (anim.frame + 1) % NPC_FRAMES;
+            if anim.timer.tick(time.delta()).just_finished() {
+                anim.frame = if oneshot {
+                    (anim.frame + 1).min(NPC_FRAMES - 1)
+                } else {
+                    (anim.frame + 1) % NPC_FRAMES
+                };
             }
         } else {
             anim.frame = 0;
         }
+
         sprite.image = frames[dir][anim.frame.min(NPC_FRAMES - 1)].clone();
         sprite.color = if aggro { vis.aggro } else { vis.base };
+    }
+}
+
+/// Мгновенная атака по серверному FX (не ждём `NpcRuntime.attacking`).
+pub fn apply_npc_sound_anims(
+    mut ev: MessageReader<crate::events::NpcSoundEvent>,
+    q_npcs: Query<(Entity, &WorldPos, &Facing), With<NpcMarker>>,
+    mut q_anim: Query<&mut NpcAnim>,
+) {
+    use protocol::messages::NpcSoundKind;
+    for ev in ev.read() {
+        if !matches!(ev.kind, NpcSoundKind::Attack) {
+            continue;
+        }
+        let Some((entity, _)) = nearest_npc(ev.pos, &q_npcs) else {
+            continue;
+        };
+        if let Ok(mut anim) = q_anim.get_mut(entity) {
+            trigger_npc_attack(&mut anim);
+        }
     }
 }
 
@@ -343,32 +294,6 @@ pub fn update_npc_hp_bars(
         sprite.custom_size = Some(Vec2::new(w, NPC_HP_H));
         sprite.color = hp_color(frac);
         tf.translation.x = -fill.full_w * 0.5;
-    }
-}
-
-/// Угасание и деспавн скелетов, выпавших из снапшота (туман войны/смерть).
-pub fn fade_unseen_npcs(
-    mut commands: Commands,
-    mut last_seen: ResMut<NpcLastSeen>,
-    mut spawned: ResMut<SpawnedNpcs>,
-    mut info: ResMut<NpcInfo>,
-    mut npc_stun: ResMut<NpcStun>,
-    q: Query<(Entity, &NpcMarker)>,
-) {
-    let now = time_in_seconds();
-    let mut gone: Vec<u32> = Vec::new();
-    for (e, marker) in q.iter() {
-        let age = last_seen.0.get(&marker.0).map(|&t| now - t).unwrap_or(0.0);
-        if age >= FADE_END {
-            commands.entity(e).despawn();
-            gone.push(marker.0);
-        }
-    }
-    for id in gone {
-        spawned.0.remove(&id);
-        last_seen.0.remove(&id);
-        info.0.remove(&id);
-        npc_stun.0.remove(&id);
     }
 }
 

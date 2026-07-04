@@ -64,6 +64,9 @@ pub struct ActorAnim {
     /// Остаток оглушения (сек) для ЭТОГО актёра (из снапшота). Пока >0 — модель
     /// замирает в Idle и над головой горят «звёздочки».
     pub stun_left: f32,
+    /// Сглаженная скорость (мир. ед./СЕК): решение «идёт/стоит» без дребезга
+    /// Walk↔Idle на кадрах, где FixedUpdate не тикнул (частота кадров ≠ тикрейт).
+    pub move_ema: f32,
 }
 
 impl ActorAnim {
@@ -94,6 +97,7 @@ impl Default for ActorAnim {
             blocking: false,
             hit_flash: 0.0,
             stun_left: 0.0,
+            move_ema: 0.0,
         }
     }
 }
@@ -182,6 +186,10 @@ pub struct NpcAnim {
     /// Предыдущая мировая позиция — чтобы крутить ходьбу ТОЛЬКО когда реально
     /// движется (иначе «марширует на месте», когда снапшоты замерли).
     pub prev: Vec2,
+    /// Сглаженная скорость (мир. ед./СЕК) — меньше дёрганья от сетевых скачков.
+    pub move_ema: f32,
+    /// Локальный таймер атаки (сек): стартует по FX/фронту, не ждём реплику.
+    pub attack_left: f32,
 }
 
 impl Default for NpcAnim {
@@ -190,6 +198,8 @@ impl Default for NpcAnim {
             frame: 0,
             timer: Timer::from_seconds(1.0 / 10.0, TimerMode::Repeating),
             prev: Vec2::ZERO,
+            move_ema: 0.0,
+            attack_left: 0.0,
         }
     }
 }

@@ -1,17 +1,12 @@
 use bevy::prelude::*;
 use bevy::ui::{AlignItems, BackgroundColor, FlexDirection, JustifyContent, Node, UiRect, Val};
-use bevy_quinnet::client::QuinnetClient;
-use bevy_quinnet::client::certificate::CertificateVerificationMode;
-use bevy_quinnet::client::connection::ClientAddrConfiguration;
-use bevy_quinnet::client::{ClientConnectionConfiguration, ClientConnectionConfigurationDefaultables};
-use protocol::quinnet_adapter::build_channels_config;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::net::SocketAddr;
 
 use crate::app_state::AppState;
 use crate::lobby::{
     drain_query_results, spawn_server_queries, LobbyServer, LobbyServers, QueryInbox, ServerStatus,
 };
-use crate::resources::CurrentConnId;
+use crate::lynet::{connect_to, LyClient};
 
 // ===== Ресурсы / компоненты =====
 
@@ -489,7 +484,7 @@ fn menu_typing(
 fn try_connect_enter(
     keys: Res<ButtonInput<KeyCode>>,
     addr: Res<ServerAddr>,
-    mut client: ResMut<QuinnetClient>,
+    mut ly: ResMut<LyClient>,
     mut next: ResMut<NextState<AppState>>,
     mut commands: Commands,
     mut err: ResMut<ConnectError>,
@@ -498,11 +493,11 @@ fn try_connect_enter(
         return;
     }
 
-    match do_connect(&addr.0, &mut client, &mut commands) {
+    match do_connect(&addr.0, &mut commands, &mut ly) {
         Ok(_) => {
             info!("✅ connected, going Connecting");
             err.0 = None;
-            commands.insert_resource(ConnectTimeout(Timer::from_seconds(3.0, TimerMode::Once)));
+            commands.insert_resource(ConnectTimeout(Timer::from_seconds(6.0, TimerMode::Once)));
             next.set(AppState::Connecting);
         }
         Err(e) => {
@@ -517,7 +512,7 @@ fn try_connect_enter(
 fn click_connect_button(
     mut q_btn: Query<&Interaction, (Changed<Interaction>, With<ConnectButton>)>,
     addr: Res<ServerAddr>,
-    mut client: ResMut<QuinnetClient>,
+    mut ly: ResMut<LyClient>,
     mut next: ResMut<NextState<AppState>>,
     mut commands: Commands,
     mut err: ResMut<ConnectError>,
@@ -527,12 +522,12 @@ fn click_connect_button(
             if addr.0.is_empty() {
                 return;
             }
-            match do_connect(&addr.0, &mut client, &mut commands) {
+            match do_connect(&addr.0, &mut commands, &mut ly) {
                 Ok(_) => {
                     info!("✅ connected, going Connecting");
                     err.0 = None;
                     commands
-                        .insert_resource(ConnectTimeout(Timer::from_seconds(3.0, TimerMode::Once)));
+                        .insert_resource(ConnectTimeout(Timer::from_seconds(6.0, TimerMode::Once)));
                     next.set(AppState::Connecting);
                 }
                 Err(e) => {
@@ -549,7 +544,7 @@ fn click_connect_button(
 fn click_server_row(
     mut q_btn: Query<(&Interaction, &ServerRowButton), Changed<Interaction>>,
     servers: Res<LobbyServers>,
-    mut client: ResMut<QuinnetClient>,
+    mut ly: ResMut<LyClient>,
     mut next: ResMut<NextState<AppState>>,
     mut commands: Commands,
     mut err: ResMut<ConnectError>,
@@ -565,11 +560,11 @@ fn click_server_row(
                 info!("сервер {} помечен офлайн, пробуем подключиться всё равно", row.address);
             }
         }
-        match do_connect(&row.address, &mut client, &mut commands) {
+        match do_connect(&row.address, &mut commands, &mut ly) {
             Ok(_) => {
                 info!("✅ connected, going Connecting");
                 err.0 = None;
-                commands.insert_resource(ConnectTimeout(Timer::from_seconds(3.0, TimerMode::Once)));
+                commands.insert_resource(ConnectTimeout(Timer::from_seconds(6.0, TimerMode::Once)));
                 next.set(AppState::Connecting);
             }
             Err(e) => {
@@ -646,40 +641,30 @@ fn render_connect_error(err: Res<ConnectError>, mut q: Query<&mut Text, With<Err
 
 fn do_connect(
     addr_str: &str,
-    client: &mut ResMut<QuinnetClient>,
     commands: &mut Commands,
+    ly: &mut ResMut<LyClient>,
 ) -> Result<(), String> {
     let server_addr: SocketAddr = addr_str
         .parse()
         .map_err(|_| format!("неверный адрес: {addr_str}"))?;
-
-    let local_bind_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0);
-    let connection_config = ClientConnectionConfiguration {
-        addr_config: ClientAddrConfiguration::from_addrs(server_addr, local_bind_addr),
-        cert_mode: CertificateVerificationMode::SkipVerification,
-        defaultables: ClientConnectionConfigurationDefaultables {
-            send_channels_cfg: build_channels_config(),
-            ..Default::default()
-        },
-    };
-
-    match client.open_connection(connection_config) {
-        Ok(conn_id) => {
-            commands.insert_resource(CurrentConnId(Some(conn_id)));
-            info!("🔌 Подключаемся к {}", addr_str);
-            Ok(())
+    // На всякий случай гасим предыдущую сессию (повторный коннект без выхода).
+    if let Some(prev) = ly.entity.take() {
+        if let Ok(mut e) = commands.get_entity(prev) {
+            e.despawn();
         }
-        Err(e) => Err(format!("{:?}", e)),
     }
+    let entity = connect_to(commands, server_addr);
+    ly.entity = Some(entity);
+    info!("🔌 Подключаемся к {} (lightyear)", addr_str);
+    Ok(())
 }
 
 pub fn connection_timeout_system(
     time: Res<Time>,
-    mut client: ResMut<QuinnetClient>,
+    mut ly: ResMut<LyClient>,
     mut next: ResMut<NextState<AppState>>,
     mut err: ResMut<ConnectError>,
-    mut timeout: Option<ResMut<ConnectTimeout>>,
-    conn_id: Option<Res<CurrentConnId>>,
+    timeout: Option<ResMut<ConnectTimeout>>,
     mut commands: Commands,
 ) {
     let Some(mut t) = timeout else {
@@ -687,16 +672,13 @@ pub fn connection_timeout_system(
     };
     t.0.tick(time.delta());
     if t.0.is_finished() {
-        // закрываем текущее соединение (если знаем id), иначе на всякий
-        if let Some(id) = conn_id.and_then(|c| c.0) {
-            let _ = client.close_connection(id);
-        } else {
-            let _ = client.close_all_connections();
+        if let Some(prev) = ly.entity.take() {
+            if let Ok(mut e) = commands.get_entity(prev) {
+                e.despawn();
+            }
         }
-        // сообщение и возврат в меню
         err.0 = Some("Таймаут подключения (сервер не отвечает)".into());
         next.set(AppState::Menu);
-        // убираем таймер
         commands.remove_resource::<ConnectTimeout>();
     }
 }

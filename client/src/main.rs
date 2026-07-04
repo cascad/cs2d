@@ -8,53 +8,46 @@ mod resources;
 mod systems;
 mod ui;
 
-// +++ добавили +++
 mod app_state;
 mod lobby;
+mod lynet;
 mod menu;
 mod pause_menu;
 
-use std::collections::VecDeque;
-
 use bevy::log::{Level, LogPlugin};
 use bevy::prelude::*;
-use bevy_quinnet::client::QuinnetClientPlugin;
+use lightyear::prelude::client::ClientPlugins;
 
 use crate::console::{capture_console_layer, setup_console_ui, toggle_console, update_console_ui};
 
-use protocol::constants::TICK_DT;
-use protocol::messages::Stance;
-
 use resources::*;
 use systems::{
-    bullet_lifecycle::bullet_lifecycle,
-    connection::{handle_connection_event, reset_identity, send_hello},
-    grenade_lifecycle::explosion_lifecycle, // grenade_lifecycle::grenade_lifecycle,
-    grenade_throw::{grenade_throw, setup_grenade_aim, update_grenade_aim},
-    input::change_stance,
-    interpolate_with_snapshot::interpolate_with_snapshot,
+    grenade_lifecycle::explosion_lifecycle,
+    grenade_throw::{setup_grenade_aim, update_grenade_aim},
     melee::{melee_arc_lifecycle, setup_melee_hint, update_melee_hint},
-    network::receive_server_messages,
-    ping::send_ping,
     rotate_to_cursor::rotate_to_cursor,
-    send_input::{send_input_and_predict, smooth_local_player},
-    shoot::shoot_mouse,
-        startup::{despawn_game_camera, setup},
-    };
+    startup::{despawn_game_camera, setup},
+};
 use ui::update_grenade_cooldown_ui::update_grenade_cooldown_ui;
 
 use crate::{
     app_state::AppState,
-    events::{
-        GrenadeDetonatedEvent, GrenadeSpawnEvent, PlayerDamagedEvent, PlayerDied, PlayerLeftEvent,
-    },
+    events::{GrenadeDetonatedEvent, PlayerDamagedEvent},
+    lynet::LyNetPlugin,
     menu::{clear_connect_timeout, connection_timeout_system, MenuPlugin},
     resources::grenades::{ClientGrenades, GrenadeCooldown, GrenadeStates},
     systems::{
-        // +++ насос Connecting: ждём первый Snapshot, затем -> InGame +++
-        aim::{spawn_aim_marker, update_aim_to_mouse}, camera::CameraFollowPlugin, connecting_pump::connecting_pump, corpse_lc::corpse_lifecycle, ensure_my_id::ensure_my_id_from_conn, fog::{apply_fog_tint, fade_unseen_players, setup_fog, update_fog}, grenade_lifecycle::spawn_grenades, iso::{animate_actors, setup_iso}, level_fixed::setup_fixed_level, network::apply_grenade_net, render_detonations::{animate_explosion_fx, render_detonations}, spawn_damage_popups::{spawn_damage_popups, update_damage_popups}, startup::load_ui_font, sync_hp_ui::{
-            cleanup_hp_ui_on_player_remove, sync_hp_ui_position, update_hp_text_from_event,
-        }, walls_cache::build_wall_aabb_cache
+        aim::{spawn_aim_marker, update_aim_to_mouse},
+        camera::CameraFollowPlugin,
+        corpse_lc::corpse_lifecycle,
+        fog::{apply_fog_tint, setup_fog, update_fog},
+        iso::{animate_actors, setup_iso},
+        level_fixed::setup_fixed_level,
+        render_detonations::{animate_explosion_fx, render_detonations},
+        spawn_damage_popups::{spawn_damage_popups, update_damage_popups},
+        startup::load_ui_font,
+        sync_hp_ui::{cleanup_hp_ui_on_player_remove, sync_hp_ui_position},
+        walls_cache::build_wall_aabb_cache,
     },
     ui::cooldowns_ui::{setup_cooldowns_ui, update_cooldowns_ui},
     ui::damage_flash::{setup_damage_flash, update_damage_flash},
@@ -97,23 +90,7 @@ fn main() {
         // конфиг клиента (ip/port сервера) из файла рядом с бинарём
         .insert_resource(crate::config::load_or_create())
         .insert_resource(MyPlayer { id: 0, got: false })
-        .insert_resource(TimeSync { offset: 0.0 })
-        .insert_resource(SnapshotBuffer {
-            snapshots: VecDeque::new(),
-            delay: 0.05,
-        })
-        .insert_resource(CurrentStance(Stance::Standing))
         .insert_resource(crate::resources::AimAngle::default())
-        .insert_resource(SendTimer(Timer::from_seconds(
-            TICK_DT,
-            TimerMode::Repeating,
-        )))
-        .insert_resource(SpawnedPlayers::default())
-        .insert_resource(SeqCounter(0))
-        .insert_resource(PendingInputsClient::default())
-        .insert_resource(HeartbeatTimer::default())
-        .insert_resource(ClientLatency::default())
-        .insert_resource(DeadPlayers::default())
         .insert_resource(GrenadeCooldown::default())
         .insert_resource(HpUiMap::default())
         .insert_resource(SolidTiles::default())
@@ -122,23 +99,13 @@ fn main() {
         .insert_resource(WallAabbCache::default())
         .insert_resource(WallGridRes::default())
         .insert_resource(VisionGridRes::default())
-        .insert_resource(LastKnownPos::default())
-        .insert_resource(LastSeen::default())
         .insert_resource(LocalAbilities::default())
         .insert_resource(LocalStatus::default())
-        .insert_resource(PredictedPos::default())
         .insert_resource(crate::resources::Corpses::default())
-        .insert_resource(crate::resources::AuthState::default())
         .insert_resource(crate::resources::ScoreboardData::default())
-        .insert_resource(crate::systems::npc::SpawnedNpcs::default())
         .insert_resource(crate::systems::npc::NpcInfo::default())
-        .insert_resource(crate::systems::npc::NpcLastSeen::default())
         .insert_resource(crate::systems::npc::NpcStun::default())
-        // ивенты
         .add_message::<PlayerDamagedEvent>()
-        .add_message::<PlayerDied>()
-        .add_message::<PlayerLeftEvent>()
-        .add_message::<GrenadeSpawnEvent>()
         .add_message::<GrenadeDetonatedEvent>()
         .add_message::<crate::events::NpcDiedEvent>()
         .add_message::<crate::events::NpcSoundEvent>()
@@ -170,7 +137,12 @@ fn main() {
                     ..default()
                 }),
         )
-        .add_plugins(QuinnetClientPlugin::default())
+        // --- Lightyear: сетевой движок + протокол + наш мост к визуалу ---
+        .add_plugins(ClientPlugins {
+            tick_duration: netproto::tick_duration(),
+        })
+        .add_plugins(netproto::ProtocolPlugin)
+        .add_plugins(LyNetPlugin)
         .add_plugins(CameraFollowPlugin)
         // (опционально) сразу включить плавный режим:
         // .insert_resource(CameraFollowSettings { mode: FollowMode::Smooth, ..default() })
@@ -190,10 +162,10 @@ fn main() {
         )
         // --- консоль логов работает в любом состоянии (тоггл по `~`) ---
         .add_systems(Update, (toggle_console, update_console_ui))
-        // --- Connecting: ждём первый снапшот и следим за таймаутом ---
+        // --- Connecting: ждём авторизацию и следим за таймаутом ---
         .add_systems(
             Update,
-            (connecting_pump, connection_timeout_system).run_if(in_state(AppState::Connecting)),
+            connection_timeout_system.run_if(in_state(AppState::Connecting)),
         )
         // сброс таймера при входе в игру
         .add_systems(OnEnter(AppState::InGame), clear_connect_timeout)
@@ -218,22 +190,6 @@ fn main() {
                 setup_status_effects_ui,
             ),
         )
-        // --- PreUpdate: сетка/инпут и приём сообщений только в InGame ---
-        .add_systems(
-            PreUpdate,
-            (send_input_and_predict, handle_connection_event)
-                .chain()
-                .run_if(in_state(AppState::InGame)),
-        )
-        .add_systems(
-            PreUpdate,
-            (ensure_my_id_from_conn, send_hello, receive_server_messages)
-                .chain()
-                .run_if(in_state(AppState::InGame)),
-        )
-        // перед каждым новым подключением сбрасываем id/Hello, чтобы реконнект
-        // заново авторизовался (и подхватил ту же статистику аккаунта на сервере)
-        .add_systems(OnEnter(AppState::Connecting), reset_identity)
         .add_systems(OnEnter(AppState::InGame), spawn_aim_marker)
         // выход из игры (возврат в меню/реконнект): убираем игровую камеру, чтобы
         // не копились камеры с одинаковым order (рендер иначе спамит warning)
@@ -256,34 +212,20 @@ fn main() {
         .add_systems(
             Update,
             (
-                smooth_local_player,
-                interpolate_with_snapshot,
-                bullet_lifecycle,
-                // grenades
-                spawn_grenades,
-                apply_grenade_net,
                 render_detonations,
                 animate_explosion_fx,
-                //
                 explosion_lifecycle,
-                grenade_throw,
                 rotate_to_cursor,
-                change_stance,
-                shoot_mouse,
                 melee_arc_lifecycle,
-                send_ping,
                 // туман: пересчёт сетки видимости (после движения) и сразу тинт
                 // спрайтов карты по ней — затемнение видно прямо на полу/стенах.
                 update_fog,
                 apply_fog_tint,
                 // анимация направленных спрайтов: ПОСЛЕ движения WorldPos
                 animate_actors,
-                // засечка направления на кольце: ПОСЛЕ обновления Facing
-                crate::systems::network::update_dir_notch,
-                // НЕПИСИ: спавн/интерполяция/анимация скелетов и трупов
+                // НЕПИСИ: анимация скелетов/зомби и трупов (состояние из реплики)
                 (
-                    crate::systems::npc::apply_npc_snapshot,
-                    crate::systems::npc::interpolate_npcs,
+                    crate::systems::npc::apply_npc_sound_anims,
                     crate::systems::npc::animate_skeletons,
                     crate::systems::npc::animate_skeleton_corpses,
                     crate::systems::npc::spawn_npc_attack_decals,
@@ -311,12 +253,9 @@ fn main() {
                 update_damage_popups,
                 crate::systems::iso::flash_on_damage,
                 sync_hp_ui_position,
-                update_hp_text_from_event,
                 cleanup_hp_ui_on_player_remove,
                 corpse_lifecycle,
-                fade_unseen_players,
                 crate::systems::npc::update_npc_hp_bars,
-                crate::systems::npc::fade_unseen_npcs,
                 update_minimap,
                 toggle_minimap,
                 (update_scoreboard_ui, update_status_effects_ui),

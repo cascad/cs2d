@@ -1,24 +1,10 @@
 use bevy::prelude::Resource;
-use bevy_quinnet::shared::channels::{ChannelConfig, SendChannelsConfiguration};
-use protocol::channels::{CHANNELS, Reliability};
 use protocol::server_meta::ServerMeta;
 use std::io::Write;
 use std::net::{IpAddr, SocketAddr, TcpListener, TcpStream};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
-
-/// Собираем `SendChannelsConfiguration` из описания протокола
-pub fn channels_config() -> SendChannelsConfiguration {
-    let kinds = CHANNELS.iter().map(|desc| match desc.reliability {
-        Reliability::OrderedReliable { max_frame_size } =>
-            ChannelConfig::OrderedReliable { max_frame_size },
-        Reliability::UnorderedReliable { max_frame_size } =>
-            ChannelConfig::UnorderedReliable { max_frame_size },
-    }).collect::<Vec<_>>();
-
-    SendChannelsConfiguration::from_configs(kinds).expect("invalid channel config")
-}
 
 /// Разделяемый счётчик игроков для меты лобби. Игровой цикл обновляет его, а
 /// фоновый TCP-листенер читает при ответе на query-запросы.

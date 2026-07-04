@@ -201,8 +201,12 @@ pub const ACTOR_BRIGHTNESS: f32 = 1.15;
 /// `world_to_screen(центр клетки)`. Подобрано под лист 256×512 (верх ромба ~y364).
 pub const TILE_ANCHOR_Y: f32 = -0.336;
 
-/// Порог перемещения за кадр (мировые ед.), выше которого считаем актёра идущим.
-const WALK_EPS: f32 = 0.35;
+/// Порог сглаженной СКОРОСТИ (мир. ед./сек), выше которого актёр «идёт».
+/// MOVE_SPEED=150, поэтому 25 надёжно отделяет ходьбу от сетевого шума.
+const WALK_EPS_SPEED: f32 = 25.0;
+/// Время сглаживания скорости (сек): убирает дребезг Walk↔Idle на кадрах, где
+/// FixedUpdate не тикнул (FPS рендера не кратен тикрейту).
+const MOVE_EMA_TAU: f32 = 0.1;
 
 /// Покадровая анимация направленных актёров (рыцарь): выбирает строку листа из
 /// [`Facing`], состояние idle/walk — по факту перемещения `WorldPos`; одноразовые
@@ -214,9 +218,15 @@ pub fn animate_actors(
     mut q: Query<(&WorldPos, &crate::components::Facing, &mut ActorAnim, &mut Sprite)>,
 ) {
     let dt = time.delta();
+    let dt_s = time.delta_secs();
     for (wp, facing, mut anim, mut sprite) in q.iter_mut() {
-        let moved = (wp.0 - anim.prev).length();
+        let step = (wp.0 - anim.prev).length();
         anim.prev = wp.0;
+        if dt_s > 0.0 {
+            let k = (dt_s / MOVE_EMA_TAU).clamp(0.0, 1.0);
+            anim.move_ema = anim.move_ema * (1.0 - k) + (step / dt_s) * k;
+        }
+        let moving = anim.move_ema > WALK_EPS_SPEED;
 
         // оглушение: плавно тикаем остаток (снапшоты его перезаписывают). Пока
         // оглушён — модель замирает в Idle (ни ходьбы, ни действий); звёздочки над
@@ -232,17 +242,20 @@ pub fn animate_actors(
 
         let oneshot = anim.state.is_oneshot();
 
-        // нужная частота кадров зависит от типа анимации:
-        // - рывок: 15 кадров ролла растягиваем РОВНО на длительность рывка
-        //   (DASH_DURATION), чтобы анимация заканчивалась тогда же, когда снимается
-        //   блокировка управления — «можно двигаться только после конца рывка»;
-        // - прочие одноразовые (удар) — ACTION_FPS; зацикленные — LOOP_FPS.
-        let want_secs = if anim.state == AnimState::Dash {
-            protocol::constants::DASH_DURATION / KNIGHT_COLS as f32
-        } else if oneshot {
-            1.0 / ACTION_FPS
-        } else {
-            1.0 / LOOP_FPS
+        // нужная частота кадров зависит от типа анимации: клипы МЕХАНИЧЕСКИХ
+        // действий растягиваются РОВНО на их геймплейное окно, чтобы визуал
+        // заканчивался в тот же момент, когда возвращается управление/готов
+        // следующий удар (единые окна из protocol::constants):
+        // - рывок: 15 кадров ролла на DASH_DURATION;
+        // - удар: 15 кадров взмаха на ATTACK_FACING_LOCK (= MELEE_SWING_TIME);
+        // - удар щитом: 15 кадров Kick на STUN_FACING_LOCK (= STUN_SWING_TIME);
+        // - косметические one-shot (Hurt/Cast) — ACTION_FPS; зацикленные — LOOP_FPS.
+        let want_secs = match anim.state {
+            AnimState::Dash => protocol::constants::DASH_DURATION / KNIGHT_COLS as f32,
+            AnimState::Attack => protocol::constants::ATTACK_FACING_LOCK / KNIGHT_COLS as f32,
+            AnimState::Kick => protocol::constants::STUN_FACING_LOCK / KNIGHT_COLS as f32,
+            _ if oneshot => 1.0 / ACTION_FPS,
+            _ => 1.0 / LOOP_FPS,
         };
         if (anim.timer.duration().as_secs_f32() - want_secs).abs() > 1e-4 {
             anim.timer
@@ -258,7 +271,7 @@ pub fn animate_actors(
         } else if oneshot {
             // доиграли действие — возвращаемся к idle/walk по факту движения
             if anim.frame >= KNIGHT_COLS {
-                let base = if moved > WALK_EPS { AnimState::Walk } else { AnimState::Idle };
+                let base = if moving { AnimState::Walk } else { AnimState::Idle };
                 anim.state = base;
                 anim.frame = 0;
                 anim.lock_facing = None;
@@ -267,7 +280,7 @@ pub fn animate_actors(
             // блок перебивает idle/walk (держится, пока mouse2 установлен)
             let base = if anim.blocking {
                 AnimState::Block
-            } else if moved > WALK_EPS {
+            } else if moving {
                 AnimState::Walk
             } else {
                 AnimState::Idle
