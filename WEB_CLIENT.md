@@ -76,6 +76,42 @@ rsync -r --delete ../dist/ vps:/opt/cs2d/dist/
 
 Обновление: `git pull && docker compose up -d --build` + свежий `dist/`.
 
+#### Порт 80 занят (на VPS уже живёт другой сайт)
+
+Наш Caddy не нужен — TLS-терминатором остаётся существующий веб-сервер.
+Поднимаем только игру (без сервиса `web`):
+
+```bash
+cd /opt/cs2d/deploy
+docker compose rm -sf web              # убрать недостартовавший контейнер
+docker compose up -d --build game restarter
+```
+
+Статику отдаёт существующий nginx (`certbot --nginx -d cs2d.example.com`
+добавит TLS-блок сам):
+
+```nginx
+server {
+    listen 80;
+    server_name cs2d.example.com;
+    root /opt/cs2d/dist;
+
+    # голая ссылка → редирект с адресом игрового сокета (IP свой)
+    location = / {
+        if ($arg_server = "") { return 302 /?server=<IP_VPS>:6001; }
+        try_files /index.html =404;
+    }
+
+    # ЖИВОЙ digest сертификата игрового сервера (том compose-сервиса game)
+    location /certificates/ {
+        alias /opt/cs2d/deploy/data/certificates/;
+    }
+}
+```
+
+Проверить, что wasm отдаётся с типом `application/wasm`: в свежих nginx он в
+`mime.types` из коробки (`curl -I .../client-*.wasm`).
+
 ### Вариант B: вручную (nginx + certbot + systemd)
 
 1. **Сервер** (headless, ассеты не нужны): собрать `cargo build --release -p

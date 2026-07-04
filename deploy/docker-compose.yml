@@ -1,10 +1,15 @@
 # Деплой CS2D на VPS: игровой сервер + Caddy (статика wasm-клиента, авто-TLS).
 #
 # Подготовка (один раз):
-#   cp .env.example .env        # вписать DOMAIN
+#   cp .env.example .env        # вписать DOMAIN и SERVER_ADDR
 #   локально: cd client && trunk build  →  залить dist/ в корень репо на VPS
 # Запуск:  docker compose up -d --build
 # Обновление: git pull && docker compose up -d --build (+ залить свежий dist/)
+#
+# Если 80/443 на машине УЖЕ заняты другим сайтом (nginx/caddy соседнего
+# проекта) — сервис `web` НЕ поднимать, статику отдаёт существующий
+# веб-сервер (конфиг в WEB_CLIENT.md, раздел «порт 80 занят»):
+#   docker compose up -d --build game restarter
 #
 # DNS: A-запись домена на IP VPS, в Cloudflare — «DNS only» (серая тучка):
 # прокси не пропустит игровой UDP (:6000, :6001).
