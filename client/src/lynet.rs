@@ -181,17 +181,16 @@ impl Plugin for LyNetPlugin {
 
 /// Случайный client_id netcode на процесс
 fn random_client_id() -> u64 {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos() as u64)
-        .unwrap_or(1);
-    (nanos ^ (std::process::id() as u64).rotate_left(32)) | 1
+    (crate::platform::now_nanos() ^ crate::platform::random_u64().rotate_left(32)) | 1
 }
 
 /// Создаёт сущность-клиент и инициирует подключение к `server_addr`.
 /// Возвращает её Entity (сохраняется в [`LyClient`]).
-pub fn connect_to(commands: &mut Commands, server_addr: SocketAddr) -> Entity {
+pub fn connect_to(
+    commands: &mut Commands,
+    server_addr: SocketAddr,
+    cert_digest: &str,
+) -> Entity {
     let client_addr = SocketAddr::new(Ipv4Addr::UNSPECIFIED.into(), 0);
     let auth = Authentication::Manual {
         server_addr,
@@ -207,11 +206,39 @@ pub fn connect_to(commands: &mut Commands, server_addr: SocketAddr) -> Entity {
         },
     )
     .expect("netcode client");
-    let input_timeline = InputTimelineConfig::default()
-        .with_input_delay(InputDelayConfig::balanced());
+    // Нативно: balanced (0-3 тика задержки по RTT). В браузере добавляем ПОЛ
+    // минимум 2 тика (30 мс): event loop браузера квантует отправку/приём по
+    // кадрам rAF, и при около-нулевом RTT localhost инпуты без запаса приходят
+    // на сервер ВПРИТЫК к своему тику (lightyear#1402) — любой хитч страницы
+    // делает их опоздавшими (сервер шагает по прошлому вводу → откаты/дёрганье).
+    #[cfg(not(target_arch = "wasm32"))]
+    let input_delay = InputDelayConfig::balanced();
+    #[cfg(target_arch = "wasm32")]
+    let input_delay = InputDelayConfig {
+        minimum_input_delay_ticks: 2,
+        maximum_input_delay_before_prediction: 3,
+        maximum_predicted_ticks: 7,
+    };
+    let input_timeline = InputTimelineConfig::default().with_input_delay(input_delay);
     let interpolation = InterpolationConfig::default()
         .with_min_delay(Duration::from_millis(10))
         .with_send_interval_ratio(1.7);
+
+    #[cfg(not(target_arch = "wasm32"))]
+    let io_bundle = {
+        let _ = cert_digest;
+        (UdpIo::default(),)
+    };
+    // Lightyear ждёт digest ЧИСТЫМ hex (без ':' из формата сервера/openssl).
+    #[cfg(target_arch = "wasm32")]
+    let io_bundle = (WebTransportClientIo {
+        certificate_digest: cert_digest
+            .chars()
+            .filter(|c| c.is_ascii_hexdigit())
+            .collect::<String>()
+            .to_lowercase(),
+    },);
+
     let entity = commands
         .spawn((
             Name::from("LyClient"),
@@ -224,7 +251,7 @@ pub fn connect_to(commands: &mut Commands, server_addr: SocketAddr) -> Entity {
             input_timeline,
             interpolation,
             netcode,
-            UdpIo::default(),
+            io_bundle,
         ))
         .id();
     commands.trigger(Connect { entity });

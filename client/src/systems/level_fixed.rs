@@ -74,8 +74,8 @@ pub fn create_fixed_level(
     let mut env = EnvLoader::new(asset_server);
 
     // решётка сплошных КЛЕТОК-СТЕН (из символьной карты; пропы сюда не входят —
-    // они на полу). Нужна, чтобы НЕ рисовать «погребённые» стены внутри толстых
-    // массивов (все 4 соседа — стены): их всё равно не видно, а отрисовка тяжелее.
+    // они на полу). По ней считаем ОТКРЫТЫЕ КРОМКИ: грань стены рисуем только на
+    // границе «стена ↔ пол».
     let wall_solid: Vec<bool> = lvl.cells.iter().map(|(_, c)| c.wall.is_some()).collect();
     let is_wall = |ix: i32, iy: i32| -> bool {
         if ix < 0 || iy < 0 || ix >= w as i32 || iy >= h as i32 {
@@ -84,47 +84,43 @@ pub fn create_fixed_level(
         wall_solid[iy as usize * w + ix as usize]
     };
 
-    // Стену рисуем выше спрайта, чтобы блок поднимался над полом. Якорь — доля
-    // СОДЕРЖИМОГО (основание ромба), поэтому при растяжении вертикали основание
-    // остаётся на world_to_screen(center), а верх тянется выше.
-    const WALL_HEIGHT_SCALE: f32 = 1.6;
+    // Стены — тонкие ПЛИТЫ ПО КРОМКАМ тайла (так задуман пак kenney: straight-
+    // куски стыкуются в сплошные фасады, а не в ряд отдельных блоков — раньше на
+    // каждой клетке рисовались обе грани полного блока, отсюда «рёбра» на прямых
+    // стенах). Плиту кладём на каждую кромку клетки-стены, за которой пол:
+    //   +y (NW-кромка экрана) → *_E    +x (NE) → *_S
+    //   −x (SW) → *_N                  −y (SE) → *_W
+    // Кромки, смотрящие ОТ камеры (_E/_S), показывают тыл/верх плиты — комната
+    // за ними остаётся видна (стиль «миниатюры»). Умеренное растяжение по
+    // вертикали даёт стенам высоту; якорь — доля СОДЕРЖИМОГО (центр ромба-
+    // основания), поэтому основание остаётся на world_to_screen(center).
+    const WALL_HEIGHT_SCALE: f32 = 1.35;
     let wall_size = Vec2::new(TILE * 2.0, TILE * 4.0 * WALL_HEIGHT_SCALE);
     let anchor = Anchor(Vec2::new(0.0, TILE_ANCHOR_Y));
     let tint = Color::srgb(WALL_BRIGHTNESS, WALL_BRIGHTNESS, WALL_BRIGHTNESS);
 
-    // --- стены: ПОЛНЫЙ блок (обе грани, обращённые к камере) — у блока ровный
-    // верх (топ-кап входит в спрайт), поэтому ряды стыкуются в сплошную стену без
-    // «зубцов». Рисуем только КРОМКУ массива (тайл с хотя бы одним соседом-полом):
-    // внутренние тайлы толстых стен невидимы. Часть стен «состаренные» (вариатив-
-    // ность, детерминированно по xy). Правая грань ниже, левая чуть поверх — чтобы
-    // по общему переднему ребру не было z-fight. ---
     for (i, (center, cell)) in lvl.cells.iter().enumerate() {
         if cell.wall.is_none() {
             continue;
         }
         let (ix, iy) = ((i % w) as i32, (i / w) as i32);
-        // Пропускаем стену ТОЛЬКО если она замурована со ВСЕХ 8 сторон (включая
-        // диагонали): иначе у вогнутых углов (косяки проёмов, углы комнат) стена
-        // видна/задевается по диагонали, но не рисовалась бы — «коллизия есть,
-        // стены нет».
-        let buried = [
-            (-1, -1), (0, -1), (1, -1),
-            (-1, 0), (1, 0),
-            (-1, 1), (0, 1), (1, 1),
-        ]
-        .iter()
-        .all(|&(dx, dy)| is_wall(ix + dx, iy + dy));
-        if buried {
-            continue;
-        }
         let aged = variant_index(ix as usize, iy as usize, 4) == 0; // ~25% «состаренных»
-        let (n_name, w_name) = if aged {
-            ("stoneWallAged_N.png", "stoneWallAged_W.png")
-        } else {
-            ("stoneWall_N.png", "stoneWall_W.png")
-        };
+        // Кромки в порядке отрисовки: сперва дальние от камеры (+y, +x), потом
+        // ближние (−x, −y) — z-подслои растут, чтобы на общих рёбрах не было
+        // z-fight (шаг 0.003 < разницы глубины соседних клеток 0.032).
+        let edges: [((i32, i32), &'static str, &'static str); 4] = [
+            ((0, 1), "stoneWall_E.png", "stoneWallAged_E.png"),
+            ((1, 0), "stoneWall_S.png", "stoneWallAged_S.png"),
+            ((-1, 0), "stoneWall_N.png", "stoneWallAged_N.png"),
+            ((0, -1), "stoneWall_W.png", "stoneWallAged_W.png"),
+        ];
         let s = world_to_screen(*center);
-        for (name, layer) in [(w_name, layers::WALL), (n_name, layers::WALL + 0.01)] {
+        for (k, ((dx, dy), plain, aged_name)) in edges.into_iter().enumerate() {
+            if is_wall(ix + dx, iy + dy) {
+                continue;
+            }
+            let name = if aged { aged_name } else { plain };
+            let layer = layers::WALL + k as f32 * 0.003;
             commands.spawn((
                 Sprite { image: env.get(name), color: tint, custom_size: Some(wall_size), ..default() },
                 anchor,

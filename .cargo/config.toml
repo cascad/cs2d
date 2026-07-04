@@ -1,0 +1,8 @@
+[target.wasm32-unknown-unknown]
+# stack-size 8 МБ (дефолт wasm — 1 МБ, нативный поток — 8 МБ): debug-сборка
+# с глубокими кадрами (декодер ogg в аудио-колбэке cpal) пробивала 1 МБ →
+# «memory access out of bounds» и мёртвый wasm при живой музыке.
+rustflags = [
+    '--cfg', 'getrandom_backend="wasm_js"',
+    '-C', 'link-arg=-zstack-size=8388608',
+]

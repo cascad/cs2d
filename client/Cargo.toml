@@ -8,25 +8,40 @@ name = "client"
 path = "src/main.rs"
 
 [dependencies]
-bevy = { version = "0.18" , features = [
+bevy = { version = "0.18", default-features = false, features = [
     "bevy_asset",
-    "bevy_sprite", 
+    "bevy_sprite",
     "bevy_render",
-    "bevy_audio",   # звук (SFX + фоновая музыка)
-    "vorbis",       # декодер OGG — в этот формат сконвертированы все наши клипы
-    "png", "x11",
-    ]}
+    "bevy_audio",
+    "vorbis",
+    "png",
+] }
 
 # Сетевой стек: Lightyear 0.26 + общий протокол/симуляция из netproto.
 netproto = { path = "../netproto" }
-lightyear = { version = "0.26", features = [
+lightyear = { version = "0.26", default-features = false, features = [
     "client",
     "netcode",
-    "udp",
     "input_native",
+    "webtransport",
+    "webtransport_self_signed",
 ] }
 
 protocol = { path = "../protocol" }
 
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
+web-time = "1.1"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+bevy = { version = "0.18", features = ["x11"] }
+lightyear = { version = "0.26", features = ["udp"] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+bevy = { version = "0.18", features = ["webgl2"] }
+getrandom = { version = "0.2", features = ["js"] }
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+console_error_panic_hook = "0.1"
+js-sys = "0.3"
+web-sys = { version = "0.3", features = ["Window", "Location", "Document", "Element", "Response"] }

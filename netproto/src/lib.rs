@@ -34,8 +34,8 @@ pub use map::{MapGrids, TILE};
 pub use messages::*;
 pub use npc::{NpcBrain, NpcGrowls, NpcRespawns, npc_ai, npc_growls, respawn_npcs, spawn_npc};
 pub use server_sim::{
-    DamageAttribution, Dead, PendingStrikes, Strike, Strikes, resolve_player_deaths,
-    respawn_players, server_cfg, server_simulate,
+    DamageAttribution, Dead, PendingStrikes, Strike, Strikes, apply_player_inputs,
+    resolve_player_deaths, respawn_players, server_cfg, server_simulate,
 };
 pub use sim::{slide, step_player};
 

@@ -117,7 +117,9 @@ pub fn setup_iso(
     // --- пол: НАСТОЯЩИЕ тайлы kenney по материалу клетки (камень/земля/дерево/
     // плитка/щебень). Для «диабловской» неровности у материалов с несколькими
     // вариантами тайл выбирается детерминированным хэшем координат — рисунок пола
-    // не повторяется монотонно, но одинаков у всех клиентов. ---
+    // не повторяется монотонно, но одинаков у всех клиентов.
+    // Под КЛЕТКАМИ-СТЕНАМИ пол НЕ рисуем: скала между комнатами — «пустота»
+    // (тьма), а не гигантский пол с ободками, как раньше. ---
     let lvl = maps::active_level(TILE);
 
     // загрузка картинок пола один раз (asset_server дедуплицирует по пути).
@@ -142,6 +144,9 @@ pub fn setup_iso(
     let tint = Color::srgb(FLOOR_BRIGHTNESS, FLOOR_BRIGHTNESS, FLOOR_BRIGHTNESS);
 
     for (i, (center, cell)) in lvl.cells.iter().enumerate() {
+        if cell.wall.is_some() {
+            continue;
+        }
         let Some(floor) = cell.floor else { continue };
         let (ix, iy) = (i % lvl.width, i / lvl.width);
         let variants = floor_variants(floor);
@@ -162,26 +167,48 @@ pub fn setup_iso(
     }
 }
 
-/// Тайлы-варианты пола для материала (имена файлов в `assets/iso_env/`). Несколько
-/// вариантов → пол не выглядит монотонной плиткой (выбор — [`variant_index`]).
+/// Тайлы-варианты пола для материала (имена файлов в `assets/iso_env/`).
+/// ПОВТОРЕНИЕ имени = вес: ровные тайлы доминируют, «фактурные» (ямы, выбитые
+/// плиты) — редкий акцент, иначе пол выглядит шумным месивом (выбор —
+/// [`variant_index`]).
 fn floor_variants(floor: Floor) -> &'static [&'static str] {
     match floor {
-        Floor::Stone => &["stone_N.png", "stoneTile_N.png", "stoneUneven_N.png"],
-        Floor::Dirt => &["dirt_N.png", "dirtTiles_N.png"],
-        Floor::Wood => &["planks_N.png"],
-        Floor::Tiles => &["stoneTile_N.png"],
-        Floor::Rubble => &["stoneMissingTiles_N.png", "stoneUneven_N.png"],
+        Floor::Stone => &[
+            "stone_N.png", "stone_N.png", "stone_N.png", "stone_N.png", "stone_N.png",
+            "stoneUneven_N.png", "stoneMissingTiles_N.png",
+        ],
+        Floor::Dirt => &[
+            "dirt_N.png", "dirt_N.png", "dirt_N.png", "dirt_N.png", "dirt_N.png",
+            "dirtTiles_N.png",
+        ],
+        Floor::Wood => &[
+            "planks_N.png", "planks_N.png", "planks_N.png", "planks_N.png", "planks_N.png",
+            "planksBroken_N.png", "planksHole_N.png",
+        ],
+        Floor::Tiles => &[
+            "stone_N.png", "stone_N.png", "stone_N.png", "stone_N.png", "stone_N.png",
+            "stone_N.png", "stoneTile_N.png",
+        ],
+        Floor::Rubble => &[
+            "stoneMissingTiles_N.png", "stoneMissingTiles_N.png", "stoneUneven_N.png",
+        ],
     }
 }
 
 /// Детерминированный выбор варианта тайла по координатам клетки (одинаков у всех
-/// клиентов). Простой хэш-микс, чтобы соседние клетки не совпадали.
+/// клиентов). Финализатор в стиле murmur: простой линейный микс давал заметные
+/// диагональные полосы одинаковых тайлов.
 #[inline]
 pub fn variant_index(ix: usize, iy: usize, n: usize) -> usize {
     if n <= 1 {
         return 0;
     }
-    let h = (ix as u32).wrapping_mul(73_856_093) ^ (iy as u32).wrapping_mul(19_349_663);
+    let mut h = (ix as u32).wrapping_mul(73_856_093) ^ (iy as u32).wrapping_mul(19_349_663);
+    h ^= h >> 16;
+    h = h.wrapping_mul(0x7feb_352d);
+    h ^= h >> 15;
+    h = h.wrapping_mul(0x846c_a68b);
+    h ^= h >> 16;
     (h % n as u32) as usize
 }
 

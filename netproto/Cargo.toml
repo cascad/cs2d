@@ -21,3 +21,16 @@ serde = { version = "1", features = ["derive"] }
 # Stance, NpcKind, constants, maps, combat, geom). glam 0.30.7 совпадает с bevy 0.18,
 # поэтому glam::Vec2 == bevy::math::Vec2 — типы общие, без конвертаций.
 protocol = { path = "../protocol" }
+
+# Для примеров-диагностик (ly_client_wt): нативный WebTransport-клиент,
+# чтобы воспроизводить проблемы браузерного клиента без браузера.
+[dev-dependencies]
+lightyear = { version = "0.26", features = [
+    "client",
+    "server",
+    "netcode",
+    "udp",
+    "input_native",
+    "webtransport",
+    "webtransport_self_signed",
+] }

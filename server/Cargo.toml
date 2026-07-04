@@ -15,10 +15,13 @@ lightyear = { version = "0.26", features = [
     "netcode",
     "udp",
     "input_native",
+    "webtransport",
+    "webtransport_self_signed",
 ] }
 protocol = { path = "../protocol" }
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
+tokio = { version = "1", features = ["rt"] }
 
 [dev-dependencies]
 bevy = { version = "0.18", default-features = false }

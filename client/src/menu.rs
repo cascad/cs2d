@@ -1,11 +1,14 @@
 use bevy::prelude::*;
+#[cfg(not(target_arch = "wasm32"))]
 use bevy::ui::{AlignItems, BackgroundColor, FlexDirection, JustifyContent, Node, UiRect, Val};
 use std::net::SocketAddr;
 
 use crate::app_state::AppState;
+#[cfg(not(target_arch = "wasm32"))]
 use crate::lobby::{
     drain_query_results, spawn_server_queries, LobbyServer, LobbyServers, QueryInbox, ServerStatus,
 };
+use crate::config::ClientConfig;
 use crate::lynet::{connect_to, LyClient};
 
 // ===== Ресурсы / компоненты =====
@@ -20,35 +23,45 @@ pub struct ConnectError(pub Option<String>); // хранит текст посл
 pub struct ConnectTimeout(pub Timer);
 
 /// Таймер периодического переопроса серверов в лобби (авто-рефреш статусов).
+#[cfg(not(target_arch = "wasm32"))]
 #[derive(Resource)]
 struct LobbyRefreshTimer(Timer);
+#[cfg(not(target_arch = "wasm32"))]
 impl Default for LobbyRefreshTimer {
     fn default() -> Self {
         Self(Timer::from_seconds(3.0, TimerMode::Repeating))
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 #[derive(Component)]
 struct MenuRoot;
+#[cfg(not(target_arch = "wasm32"))]
 #[derive(Component)]
 struct MenuCamera;
+#[cfg(not(target_arch = "wasm32"))]
 #[derive(Component)]
 struct AddrValue; // текст набранного адреса (моношрифт)
+#[cfg(not(target_arch = "wasm32"))]
 #[derive(Component)]
 struct ConnectButton; // прямоугольник-кнопка ручного ввода
+#[cfg(not(target_arch = "wasm32"))]
 #[derive(Component)]
 struct ErrorText; // текст ошибки
 
 /// Кликабельная строка сервера из лобби. Хранит индекс в `LobbyServers` и адрес.
+#[cfg(not(target_arch = "wasm32"))]
 #[derive(Component)]
 struct ServerRowButton {
     index: usize,
     address: String,
 }
 /// Текст имени сервера в строке (обновляется при получении меты).
+#[cfg(not(target_arch = "wasm32"))]
 #[derive(Component)]
 struct ServerRowName(usize);
 /// Текст статуса сервера в строке (проверка/онлайн N/M/офлайн).
+#[cfg(not(target_arch = "wasm32"))]
 #[derive(Component)]
 struct ServerRowStatus(usize);
 
@@ -58,31 +71,35 @@ pub struct MenuPlugin;
 impl Plugin for MenuPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<ServerAddr>()
-            .init_resource::<ConnectError>()
-            .init_resource::<LobbyServers>()
+            .init_resource::<ConnectError>();
+        #[cfg(not(target_arch = "wasm32"))]
+        app.init_resource::<LobbyServers>()
             .init_resource::<QueryInbox>()
-            .init_resource::<LobbyRefreshTimer>()
-            .add_systems(OnEnter(AppState::Menu), menu_setup)
+            .init_resource::<LobbyRefreshTimer>();
+        #[cfg(not(target_arch = "wasm32"))]
+        app.add_systems(OnEnter(AppState::Menu), menu_setup)
             .add_systems(
                 Update,
                 (
-                    menu_typing,          // ввод адреса + курсор
-                    try_connect_enter,    // Enter → попытка коннекта с показом ошибки
-                    click_connect_button, // клик по кнопке ручного ввода → то же
-                    click_server_row,     // клик по серверу из списка → коннект
-                    auto_refresh_lobby,   // периодический переопрос серверов
-                    drain_query_results,  // приём результатов опроса серверов
-                    refresh_lobby_ui,     // отрисовка статусов серверов
-                    render_connect_error, // обновление текста ошибки
+                    menu_typing,
+                    try_connect_enter,
+                    click_connect_button,
+                    click_server_row,
+                    auto_refresh_lobby,
+                    drain_query_results,
+                    refresh_lobby_ui,
+                    render_connect_error,
                 )
                     .run_if(in_state(AppState::Menu)),
-            )
-            .add_systems(OnExit(AppState::Menu), menu_cleanup);
+            );
+        #[cfg(not(target_arch = "wasm32"))]
+        app.add_systems(OnExit(AppState::Menu), menu_cleanup);
     }
 }
 
-// ===== UI =====
+// ===== UI (native) =====
 
+#[cfg(not(target_arch = "wasm32"))]
 fn menu_setup(
     mut commands: Commands,
     mut addr: ResMut<ServerAddr>,
@@ -278,6 +295,7 @@ fn menu_setup(
 }
 
 /// Спавнит одну кликабельную строку сервера: слева имя, справа статус.
+#[cfg(not(target_arch = "wasm32"))]
 fn spawn_server_row(
     list: &mut ChildSpawnerCommands<'_>,
     index: usize,
@@ -344,6 +362,7 @@ fn spawn_server_row(
 }
 
 /// Текстовое представление статуса для правой части строки.
+#[cfg(not(target_arch = "wasm32"))]
 fn status_text(status: &ServerStatus) -> String {
     match status {
         ServerStatus::Checking => "проверка…".to_string(),
@@ -358,6 +377,7 @@ fn status_text(status: &ServerStatus) -> String {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn status_color(status: &ServerStatus) -> Color {
     match status {
         ServerStatus::Checking => Color::srgba(0.75, 0.75, 0.5, 1.0),
@@ -367,6 +387,7 @@ fn status_color(status: &ServerStatus) -> Color {
 }
 
 /// Фон строки: онлайн подсвечиваем (зеленоватый), офлайн приглушаем.
+#[cfg(not(target_arch = "wasm32"))]
 fn row_bg(status: &ServerStatus) -> Color {
     match status {
         ServerStatus::Checking => Color::srgba(0.10, 0.11, 0.14, 1.0),
@@ -375,6 +396,7 @@ fn row_bg(status: &ServerStatus) -> Color {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn menu_cleanup(
     mut commands: Commands,
     mut err: ResMut<ConnectError>,
@@ -399,6 +421,7 @@ struct BackspaceRepeat {
     acc: f32,  // накопитель для интервала повтора
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn menu_typing(
     mut addr: ResMut<ServerAddr>,
     mut q_value: Query<&mut Text, With<AddrValue>>,
@@ -464,6 +487,7 @@ fn menu_typing(
         bs.acc = 0.0;
     }
     if keys.just_pressed(KeyCode::Escape) {
+        #[cfg(not(target_arch = "wasm32"))]
         std::process::exit(0);
     }
 
@@ -481,9 +505,11 @@ fn menu_typing(
 
 // ===== Коннект по Enter =====
 
+#[cfg(not(target_arch = "wasm32"))]
 fn try_connect_enter(
     keys: Res<ButtonInput<KeyCode>>,
     addr: Res<ServerAddr>,
+    cfg: Res<ClientConfig>,
     mut ly: ResMut<LyClient>,
     mut next: ResMut<NextState<AppState>>,
     mut commands: Commands,
@@ -493,7 +519,7 @@ fn try_connect_enter(
         return;
     }
 
-    match do_connect(&addr.0, &mut commands, &mut ly) {
+    match do_connect(&addr.0, &mut commands, &mut ly, &cfg, None) {
         Ok(_) => {
             info!("✅ connected, going Connecting");
             err.0 = None;
@@ -509,9 +535,11 @@ fn try_connect_enter(
 
 // ===== Коннект по клику =====
 
+#[cfg(not(target_arch = "wasm32"))]
 fn click_connect_button(
     mut q_btn: Query<&Interaction, (Changed<Interaction>, With<ConnectButton>)>,
     addr: Res<ServerAddr>,
+    cfg: Res<ClientConfig>,
     mut ly: ResMut<LyClient>,
     mut next: ResMut<NextState<AppState>>,
     mut commands: Commands,
@@ -522,7 +550,7 @@ fn click_connect_button(
             if addr.0.is_empty() {
                 return;
             }
-            match do_connect(&addr.0, &mut commands, &mut ly) {
+            match do_connect(&addr.0, &mut commands, &mut ly, &cfg, None) {
                 Ok(_) => {
                     info!("✅ connected, going Connecting");
                     err.0 = None;
@@ -541,9 +569,11 @@ fn click_connect_button(
 
 // ===== Коннект по клику на сервер из списка =====
 
+#[cfg(not(target_arch = "wasm32"))]
 fn click_server_row(
     mut q_btn: Query<(&Interaction, &ServerRowButton), Changed<Interaction>>,
     servers: Res<LobbyServers>,
+    cfg: Res<ClientConfig>,
     mut ly: ResMut<LyClient>,
     mut next: ResMut<NextState<AppState>>,
     mut commands: Commands,
@@ -553,14 +583,12 @@ fn click_server_row(
         if *interaction != Interaction::Pressed {
             continue;
         }
-        // Предупредим, если сервер не онлайн, но попытку всё равно сделаем —
-        // мета могла не успеть прийти, а подключиться пользователь хочет сейчас.
         if let Some(s) = servers.0.get(row.index) {
             if s.status == ServerStatus::Offline {
                 info!("сервер {} помечен офлайн, пробуем подключиться всё равно", row.address);
             }
         }
-        match do_connect(&row.address, &mut commands, &mut ly) {
+        match do_connect(&row.address, &mut commands, &mut ly, &cfg, None) {
             Ok(_) => {
                 info!("✅ connected, going Connecting");
                 err.0 = None;
@@ -579,6 +607,7 @@ fn click_server_row(
 
 /// Периодически (по таймеру) перезапускает опрос всех серверов лобби, не сбрасывая
 /// текущие статусы — чтобы не мигало, а просто обновлялось число игроков/доступность.
+#[cfg(not(target_arch = "wasm32"))]
 fn auto_refresh_lobby(
     time: Res<Time>,
     mut refresh: ResMut<LobbyRefreshTimer>,
@@ -595,6 +624,7 @@ fn auto_refresh_lobby(
 
 // ===== Перерисовка статусов серверов в списке =====
 
+#[cfg(not(target_arch = "wasm32"))]
 fn refresh_lobby_ui(
     servers: Res<LobbyServers>,
     mut q_name: Query<(&ServerRowName, &mut Text), Without<ServerRowStatus>>,
@@ -624,6 +654,7 @@ fn refresh_lobby_ui(
 
 // ===== Отрисовка текста ошибки =====
 
+#[cfg(not(target_arch = "wasm32"))]
 fn render_connect_error(err: Res<ConnectError>, mut q: Query<&mut Text, With<ErrorText>>) {
     if !err.is_changed() {
         return;
@@ -639,10 +670,12 @@ fn render_connect_error(err: Res<ConnectError>, mut q: Query<&mut Text, With<Err
 
 // ===== Общая функция подключения (как у тебя в setup ранее) =====
 
-fn do_connect(
+pub fn do_connect(
     addr_str: &str,
     commands: &mut Commands,
-    ly: &mut ResMut<LyClient>,
+    ly: &mut LyClient,
+    cfg: &ClientConfig,
+    runtime_digest: Option<&str>,
 ) -> Result<(), String> {
     let server_addr: SocketAddr = addr_str
         .parse()
@@ -653,7 +686,8 @@ fn do_connect(
             e.despawn();
         }
     }
-    let entity = connect_to(commands, server_addr);
+    let digest = cfg.connect_cert_digest(runtime_digest);
+    let entity = connect_to(commands, server_addr, &digest);
     ly.entity = Some(entity);
     info!("🔌 Подключаемся к {} (lightyear)", addr_str);
     Ok(())

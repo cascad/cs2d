@@ -1,0 +1,25 @@
+# Статика браузерного клиента + живой digest игрового сервера.
+# TLS (Let's Encrypt) Caddy получает и продлевает сам — домен из deploy/.env.
+{$DOMAIN} {
+	encode zstd gzip
+
+	# Голая ссылка (https://домен без ?server=) → редирект с адресом игрового
+	# сокета из .env: игрокам достаточно домена, IP помнить не нужно.
+	@noserver {
+		path /
+		not query server=*
+	}
+	redir @noserver /?server={$SERVER_ADDR} temporary
+
+	# /certificates/digest.txt — ЖИВОЙ digest из каталога игрового сервера
+	# (протухший digest из сборки dist/ сюда не попадает: см. WEB_CLIENT.md).
+	handle_path /certificates/* {
+		root * /srv/live-certificates
+		file_server
+	}
+
+	handle {
+		root * /srv/dist
+		file_server
+	}
+}

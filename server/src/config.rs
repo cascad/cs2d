@@ -14,15 +14,37 @@ pub struct ServerConfig {
     /// IP интерфейса для прослушивания. `0.0.0.0` — все интерфейсы (LAN/интернет),
     /// `127.0.0.1` — только локально.
     pub ip: String,
-    /// UDP-порт (QUIC). На этом же номере порта поднимается TCP-листенер меты
-    /// для мини-лобби клиента (см. `net::start_meta_endpoint`).
+    /// UDP-порт (нативный клиент).
     pub port: u16,
+    /// WebTransport-порт (браузерный клиент).
+    #[serde(default = "default_webtransport_port")]
+    pub webtransport_port: u16,
+    /// SAN для self-signed TLS (dev). В prod — `tls_cert_pem` + `tls_key_pem`.
+    #[serde(default = "default_webtransport_sans")]
+    pub webtransport_sans: Vec<String>,
+    /// Путь к cert.pem (Let's Encrypt / свой CA). Пусто — self-signed.
+    #[serde(default)]
+    pub tls_cert_pem: Option<String>,
+    #[serde(default)]
+    pub tls_key_pem: Option<String>,
     /// Человекочитаемое имя сервера — показывается в списке серверов клиента.
     #[serde(default = "default_name")]
     pub name: String,
     /// Лимит игроков (для отображения в лобби). `0` — лимит не задаётся.
     #[serde(default)]
     pub max_players: u32,
+}
+
+fn default_webtransport_port() -> u16 {
+    6001
+}
+
+fn default_webtransport_sans() -> Vec<String> {
+    vec![
+        "localhost".to_string(),
+        "127.0.0.1".to_string(),
+        "::1".to_string(),
+    ]
 }
 
 fn default_name() -> String {
@@ -34,6 +56,10 @@ impl Default for ServerConfig {
         Self {
             ip: "0.0.0.0".to_string(),
             port: 6000,
+            webtransport_port: default_webtransport_port(),
+            webtransport_sans: default_webtransport_sans(),
+            tls_cert_pem: None,
+            tls_key_pem: None,
             name: default_name(),
             max_players: 0,
         }

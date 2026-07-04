@@ -50,12 +50,19 @@ pub fn entity_visible(
 /// `gain_visibility`/`lose_visibility` кэшируются — повторные вызовы идемпотентны.
 pub fn update_interest(
     clients: Query<(&ControlledBy, &Position, &Rotation), With<Player>>,
+    senders: Query<(), With<ReplicationSender>>,
     mut visibles: Query<(&Position, &mut ReplicationState), With<NetworkVisibility>>,
     map: Option<Res<MapGrids>>,
 ) {
     // sender-entity клиента = его link; позиция и взгляд берём с его игрока.
-    let viewers: Vec<(Entity, Vec2, f32)> =
-        clients.iter().map(|(c, p, r)| (c.owner, p.0, r.0)).collect();
+    // Линк проверяем на живость: при дисконнекте netcode деспавнит его раньше,
+    // чем очистится игрок, — мёртвый sender в gain_visibility оставлял «висячую»
+    // запись (и ронял сервер паникой в update_network_visibility).
+    let viewers: Vec<(Entity, Vec2, f32)> = clients
+        .iter()
+        .filter(|(c, ..)| senders.contains(c.owner))
+        .map(|(c, p, r)| (c.owner, p.0, r.0))
+        .collect();
     if viewers.is_empty() {
         return;
     }

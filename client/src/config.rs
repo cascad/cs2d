@@ -1,18 +1,22 @@
 //! Конфиг клиента `client_config.toml`. Задаёт адрес/порт сервера (значение по
 //! умолчанию в меню), имя/пароль аккаунта и список серверов для лобби.
 //!
-//! Поиск: `--config <path>` (если задан) → рабочий каталог → рядом с бинарём.
-//! - Файл найден, но TOML битый → клиент ПАДАЕТ с логом (лучше упасть, чем молча
-//!   зайти под случайным именем — это и приводило к «опять рандомный ник»).
-//! - `--config` указан, но файла нет/не читается → тоже падаем (его задали явно).
-//! - Конфига нигде нет → НЕ ломаемся: дефолты (127.0.0.1:6000) со случайным именем
-//!   `Player#xxxx`; на диск ничего не пишем, поэтому при перезапуске имя новое.
+//! Поиск (native): `--config <path>` → рабочий каталог → рядом с бинарём.
+//! Wasm: вшитый `client_config.toml` + переопределение `?server=host:port` и
+//! `#cert_digest` из URL страницы.
 
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(not(target_arch = "wasm32"))]
+use std::path::PathBuf;
 
 const FILE_NAME: &str = "client_config.toml";
+
+/// Digest self-signed сертификата WebTransport (dev). На wasm вшивается из
+/// `certificates/digest.txt` при сборке; можно переопределить hash-фрагментом URL.
+#[cfg(target_arch = "wasm32")]
+const DEFAULT_CERT_DIGEST: &str = include_str!("../../certificates/digest.txt");
 
 /// Один сервер из списка лобби. Адрес — строка `ip:port` (тот же порт, что и
 /// игровой; на нём же отвечает мета по TCP).
@@ -29,8 +33,15 @@ pub struct ServerEntry {
 pub struct ClientConfig {
     /// IP/хост сервера, к которому подключаемся по умолчанию (поле ручного ввода).
     pub ip: String,
-    /// UDP-порт сервера (QUIC).
+    /// UDP-порт сервера (нативный клиент).
     pub port: u16,
+    /// WebTransport-порт (браузерный клиент). По умолчанию UDP+1.
+    #[serde(default = "default_webtransport_port")]
+    pub webtransport_port: u16,
+    /// Hex-digest self-signed TLS для WebTransport (dev). Пустая строка — доверять
+    /// только настоящим сертификатам (prod с Let's Encrypt).
+    #[serde(default)]
+    pub cert_digest: String,
     /// Имя аккаунта (логин) для авторизации на сервере и строки в таблице очков.
     #[serde(default = "default_name")]
     pub name: String,
@@ -43,22 +54,28 @@ pub struct ClientConfig {
     pub servers: Vec<ServerEntry>,
 }
 
+fn default_webtransport_port() -> u16 {
+    6001
+}
+
 fn default_name() -> String {
     "Player".to_string()
 }
 
-/// Короткий случайный хвост к имени в стиле Discord (`Player#a3f9`). Без внешних
-/// крейтов: мешаем наносекунды и pid, прогоняем через xorshift и берём 4 hex.
-/// Этого «кусочка» хватает, чтобы клиенты на одной машине не сливались в один
-/// аккаунт, и при каждом перезапуске (без конфига) имя получается новым.
+/// Первая непустая строка без `#`-комментария (формат `certificates/digest.txt`).
+pub fn parse_digest_file(text: &str) -> String {
+    text.lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty() && !l.starts_with('#'))
+        .unwrap_or("")
+        .to_string()
+}
+
+/// Короткий случайный хвост к имени в стиле Discord (`Player#a3f9`).
 fn random_suffix() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos() as u64)
-        .unwrap_or(0);
-    let pid = std::process::id() as u64;
-    let mut x = nanos ^ pid.rotate_left(32) ^ nanos.rotate_left(17) ^ 0x9E37_79B9_7F4A_7C15;
+    let nanos = crate::platform::now_nanos();
+    let pid_mix = crate::platform::random_u64();
+    let mut x = nanos ^ pid_mix.rotate_left(32) ^ nanos.rotate_left(17) ^ 0x9E37_79B9_7F4A_7C15;
     x ^= x << 13;
     x ^= x >> 7;
     x ^= x << 17;
@@ -75,6 +92,8 @@ impl Default for ClientConfig {
         Self {
             ip: "127.0.0.1".to_string(),
             port: 6000,
+            webtransport_port: default_webtransport_port(),
+            cert_digest: String::new(),
             name: default_name(),
             password: String::new(),
             servers: vec![ServerEntry {
@@ -86,13 +105,54 @@ impl Default for ClientConfig {
 }
 
 impl ClientConfig {
-    /// Строка вида `ip:port` для поля адреса в меню.
+    /// Строка вида `ip:port` для поля адреса в меню (UDP, нативный клиент).
     pub fn address(&self) -> String {
         format!("{}:{}", self.ip, self.port)
+    }
+
+    /// Адрес WebTransport для браузерного клиента.
+    pub fn webtransport_address(&self) -> String {
+        format!("{}:{}", self.ip, self.webtransport_port)
+    }
+
+    /// Адрес подключения для текущей платформы.
+    pub fn connect_address(&self) -> String {
+        #[cfg(target_arch = "wasm32")]
+        {
+            self.webtransport_address()
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.address()
+        }
+    }
+
+    /// Digest TLS для WebTransportClientIo.
+    pub fn effective_cert_digest(&self) -> String {
+        #[cfg(target_arch = "wasm32")]
+        {
+            if !self.cert_digest.is_empty() {
+                return self.cert_digest.clone();
+            }
+            parse_digest_file(DEFAULT_CERT_DIGEST)
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.cert_digest.clone()
+        }
+    }
+
+    /// Digest для connect: runtime (wasm HTTP) → конфиг/URL → embedded.
+    pub fn connect_cert_digest(&self, runtime: Option<&str>) -> String {
+        if let Some(d) = runtime.filter(|s| !s.is_empty()) {
+            return d.to_string();
+        }
+        self.effective_cert_digest()
     }
 }
 
 /// Явный путь из аргумента `--config <path>` или `--config=<path>`, если задан.
+#[cfg(not(target_arch = "wasm32"))]
 fn cli_config_path() -> Option<PathBuf> {
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
@@ -105,12 +165,10 @@ fn cli_config_path() -> Option<PathBuf> {
     None
 }
 
-/// Кандидаты на авто-поиск конфига (когда `--config` не задан), по приоритету:
-/// 1) рабочий каталог (так его находит `cargo run` из корня проекта);
-/// 2) каталог рядом с бинарём (так его находит распакованная сборка).
-/// Используется ПЕРВЫЙ существующий.
+/// Кандидаты на авто-поиск конфига (native).
+#[cfg(not(target_arch = "wasm32"))]
 fn auto_candidates() -> Vec<PathBuf> {
-    let mut v = vec![PathBuf::from(FILE_NAME)]; // cwd/client_config.toml
+    let mut v = vec![PathBuf::from(FILE_NAME)];
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
             let p = dir.join(FILE_NAME);
@@ -122,19 +180,6 @@ fn auto_candidates() -> Vec<PathBuf> {
     v
 }
 
-/// Конфиг по умолчанию, но со СГЕНЕРИРОВАННЫМ именем (`Player#xxxx`). Используем
-/// ТОЛЬКО когда конфига нигде нет: файл при этом НЕ создаём, поэтому при каждом
-/// перезапуске клиента имя будет новым.
-fn generated_default() -> ClientConfig {
-    ClientConfig {
-        name: generated_name(),
-        ..ClientConfig::default()
-    }
-}
-
-/// Парсит текст конфига или ЛОМАЕТ клиент с понятным логом. Битый TOML — это
-/// ошибка пользователя (а не повод молча подменить имя на случайное): лучше упасть
-/// громко, чем зайти в игру под чужим/рандомным ником.
 fn parse_or_panic(text: &str, path: &Path) -> ClientConfig {
     match toml::from_str::<ClientConfig>(text) {
         Ok(cfg) => {
@@ -142,8 +187,6 @@ fn parse_or_panic(text: &str, path: &Path) -> ClientConfig {
             cfg
         }
         Err(e) => {
-            // load_or_create вызывается ДО инициализации логгера Bevy — пишем в
-            // stderr напрямую (panic туда же), чтобы сообщение точно было видно.
             eprintln!(
                 "[config] FATAL: не удалось разобрать {}:\n{e}\n\
                  Почините TOML (или удалите файл — тогда сгенерируется случайное имя).",
@@ -154,33 +197,93 @@ fn parse_or_panic(text: &str, path: &Path) -> ClientConfig {
     }
 }
 
-/// Загружает конфиг клиента:
-/// - `--config <path>`: файл ОБЯЗАН существовать и парситься, иначе — паника;
-/// - иначе ищем `client_config.toml` в рабочем каталоге и рядом с бинарём; первый
-///   существующий парсим (битый → паника с логом);
-/// - если конфига нигде нет — клиент НЕ ломается: дефолты со случайным именем
-///   `Player#xxxx` (на диск ничего не пишем, поэтому при перезапуске имя новое).
-pub fn load_or_create() -> ClientConfig {
-    // 1) Явный путь — обязателен и не прощает ошибок (его задали намеренно).
-    if let Some(path) = cli_config_path() {
-        let text = std::fs::read_to_string(&path).unwrap_or_else(|e| {
-            eprintln!("[config] FATAL: --config {}: {e}", path.display());
-            panic!("не удалось прочитать --config {}: {e}", path.display());
-        });
-        return parse_or_panic(&text, &path);
+/// Конфиг по умолчанию со случайным именем (без файла на диске).
+fn generated_default() -> ClientConfig {
+    ClientConfig {
+        name: generated_name(),
+        ..ClientConfig::default()
     }
-    // 2) Авто-поиск: первый существующий кандидат. Битый — паника (см. parse_or_panic).
-    for path in auto_candidates() {
-        if let Ok(text) = std::fs::read_to_string(&path) {
-            return parse_or_panic(&text, &path);
+}
+
+#[cfg(target_arch = "wasm32")]
+fn apply_url_overrides(cfg: &mut ClientConfig) {
+    let Some(window) = web_sys::window() else {
+        return;
+    };
+    if let Ok(search) = window.location().search() {
+        if let Some(server) = parse_query_param(&search, "server") {
+            if let Some((host, port)) = split_host_port(&server) {
+                cfg.ip = host;
+                cfg.webtransport_port = port;
+                info!("⚙ wasm: server из URL → {}", cfg.webtransport_address());
+            }
         }
     }
-    // 3) Конфига нигде нет — это НЕ ошибка: дефолты со случайным именем.
-    let cfg = generated_default();
-    eprintln!(
-        "[config] конфиг не найден (ни в рабочем каталоге, ни рядом с бинарём); \
-         имя сгенерировано: {} (файл не создаётся — при перезапуске будет новое)",
-        cfg.name
-    );
-    cfg
+    if let Ok(hash) = window.location().hash() {
+        let digest = hash.trim_start_matches('#').trim();
+        if digest.len() > 10 {
+            cfg.cert_digest = digest.to_string();
+            info!("⚙ wasm: cert_digest из URL hash");
+        }
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn parse_query_param(search: &str, key: &str) -> Option<String> {
+    let q = search.trim_start_matches('?');
+    for pair in q.split('&') {
+        let mut it = pair.splitn(2, '=');
+        let k = it.next()?;
+        if k == key {
+            return it.next().map(|v| v.to_string());
+        }
+    }
+    None
+}
+
+#[cfg(target_arch = "wasm32")]
+fn split_host_port(addr: &str) -> Option<(String, u16)> {
+    if let Some((host, port)) = addr.rsplit_once(':') {
+        let port: u16 = port.parse().ok()?;
+        return Some((host.to_string(), port));
+    }
+    Some((addr.to_string(), default_webtransport_port()))
+}
+
+/// Загружает конфиг клиента.
+pub fn load_or_create() -> ClientConfig {
+    #[cfg(target_arch = "wasm32")]
+    {
+        let mut cfg = parse_or_panic(
+            include_str!("../../client_config.toml"),
+            Path::new("embedded/client_config.toml"),
+        );
+        apply_url_overrides(&mut cfg);
+        if cfg.name == default_name() || cfg.name.is_empty() {
+            cfg.name = generated_name();
+        }
+        return cfg;
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        if let Some(path) = cli_config_path() {
+            let text = std::fs::read_to_string(&path).unwrap_or_else(|e| {
+                eprintln!("[config] FATAL: --config {}: {e}", path.display());
+                panic!("не удалось прочитать --config {}: {e}", path.display());
+            });
+            return parse_or_panic(&text, &path);
+        }
+        for path in auto_candidates() {
+            if let Ok(text) = std::fs::read_to_string(&path) {
+                return parse_or_panic(&text, &path);
+            }
+        }
+        let cfg = generated_default();
+        eprintln!(
+            "[config] конфиг не найден; имя сгенерировано: {} (файл не создаётся)",
+            cfg.name
+        );
+        cfg
+    }
 }

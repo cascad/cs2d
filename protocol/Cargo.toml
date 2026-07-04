@@ -9,5 +9,9 @@ serde = { version = "1", features = ["derive"] }
 # иначе glam::Vec2 в protocol ≠ bevy::math::Vec2 в клиенте/сервере.
 glam = { version = "0.30.7", features = ["serde"] }
 
+[dev-dependencies]
+# только для examples/map_preview — офлайн-композит карты в PNG
+image = "0.25"
+
 [features]
 default = []

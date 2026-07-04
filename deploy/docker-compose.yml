@@ -1,0 +1,62 @@
+# Деплой CS2D на VPS: игровой сервер + Caddy (статика wasm-клиента, авто-TLS).
+#
+# Подготовка (один раз):
+#   cp .env.example .env        # вписать DOMAIN
+#   локально: cd client && trunk build  →  залить dist/ в корень репо на VPS
+# Запуск:  docker compose up -d --build
+# Обновление: git pull && docker compose up -d --build (+ залить свежий dist/)
+#
+# DNS: A-запись домена на IP VPS, в Cloudflare — «DNS only» (серая тучка):
+# прокси не пропустит игровой UDP (:6000, :6001).
+
+services:
+  game:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    container_name: cs2d-game
+    restart: unless-stopped
+    ports:
+      - "6000:6000/udp" # нативные клиенты (игра)
+      - "6000:6000/tcp" # мета лобби нативного клиента
+      - "6001:6001/udp" # WebTransport (браузер)
+    volumes:
+      # живой digest self-signed сертификата — его отдаёт Caddy браузеру
+      - ./data/certificates:/app/certificates
+      # свой конфиг (опционально): раскомментируйте и положите файл рядом
+      # - ./server_config.toml:/app/server_config.toml
+
+  web:
+    image: caddy:2
+    container_name: cs2d-web
+    restart: unless-stopped
+    ports:
+      - "80:80"       # ACME http-challenge + редирект на https
+      - "443:443"
+      - "443:443/udp" # HTTP/3 для самой страницы (не игровой трафик)
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ../dist:/srv/dist:ro                      # статика (trunk build)
+      - ./data/certificates:/srv/live-certificates:ro # живой digest от game
+      - caddy_data:/data
+      - caddy_config:/config
+    environment:
+      - DOMAIN=${DOMAIN:?set DOMAIN in deploy/.env}
+      - SERVER_ADDR=${SERVER_ADDR:?set SERVER_ADDR in deploy/.env}
+    depends_on:
+      - game
+
+  # Self-signed сертификат WebTransport живёт 14 дней (лимит Chrome) и
+  # пересоздаётся при старте сервера — рестартуем game раз в неделю.
+  # Игрокам в браузере после рестарта достаточно F5 (digest подтянется живой).
+  restarter:
+    image: docker:cli
+    container_name: cs2d-restarter
+    restart: unless-stopped
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    entrypoint: ["/bin/sh", "-c", "while true; do sleep 604800; docker restart cs2d-game; done"]
+
+volumes:
+  caddy_data:
+  caddy_config:

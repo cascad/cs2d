@@ -1,0 +1,16 @@
+[build]
+dist = "../dist"
+public_url = "/"
+# ВСЕГДА release: `trunk serve` без этого пересобирает wasm в DEBUG и молча
+# перезаписывает release-сборку. Debug-wasm не держит 60 fps → клиент не успевает
+# тикать 66.7 Гц → lightyear уходит в спираль откатов («пинг 2 секунды», дёрганье).
+release = true
+
+[watch]
+# Следим за кодом клиента и digest'ом сервера; assets не триггерят пересборку.
+watch = [".", "../certificates/digest.txt", "../netproto", "../protocol"]
+
+[serve]
+addresses = ["127.0.0.1"]
+port = 8080
+open = false

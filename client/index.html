@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>CS2D</title>
+    <style>
+        html, body {
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            height: 100%;
+            background: #0c0a0e;
+            overflow: hidden;
+        }
+        canvas {
+            width: 100%;
+            height: 100%;
+            display: block;
+        }
+        #loading {
+            position: fixed;
+            inset: 0;
+            z-index: 1000;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: #aaa;
+            font-family: system-ui, sans-serif;
+            pointer-events: none;
+            background: #0c0a0e;
+        }
+    </style>
+    <link data-trunk rel="rust" data-bin="client" />
+    <link data-trunk rel="copy-dir" href="../assets" />
+    <link data-trunk rel="copy-file" href="../certificates/digest.txt" data-target-path="certificates" />
+    <script>
+        // Autoplay-политика браузера: AudioContext создаётся в состоянии
+        // "suspended", пока пользователь не совершил жест (клик/клавиша/тач).
+        // cpal (bevy_audio) вызывает resume() один раз при старте — ДО жеста —
+        // и больше не пытается, поэтому звука нет вовсе. Перехватываем
+        // конструктор (классический скрипт в head выполняется раньше module-глю
+        // Trunk, так что wasm получит наш патченный класс), копим контексты и
+        // будим их на каждый жест (после сворачивания вкладки браузер может
+        // снова приостановить контекст — слушатели не одноразовые).
+        (function () {
+            const contexts = [];
+            for (const name of ["AudioContext", "webkitAudioContext"]) {
+                const Orig = window[name];
+                if (!Orig) continue;
+                const Patched = function (...args) {
+                    const ctx = new Orig(...args);
+                    contexts.push(ctx);
+                    console.info("[audio] AudioContext created, state=" + ctx.state);
+                    return ctx;
+                };
+                Patched.prototype = Orig.prototype;
+                Object.setPrototypeOf(Patched, Orig);
+                window[name] = Patched;
+            }
+            const resume = () => {
+                for (const ctx of contexts) {
+                    if (ctx.state === "suspended") {
+                        ctx.resume().then(
+                            () => console.info("[audio] AudioContext resumed"),
+                            (e) => console.warn("[audio] resume failed", e)
+                        );
+                    }
+                }
+            };
+            for (const ev of ["pointerdown", "keydown", "touchstart"]) {
+                window.addEventListener(ev, resume, { capture: true });
+            }
+            window.__cs2dAudioContexts = contexts;
+        })();
+    </script>
+</head>
+<body>
+    <div id="loading">Загрузка WASM…</div>
+    <script>
+        // Скрываем HTML-оверлей, когда Trunk поднял wasm (Bevy тоже скрывает из Rust).
+        window.addEventListener("TrunkApplicationStarted", () => {
+            const el = document.getElementById("loading");
+            if (el) el.style.display = "none";
+        });
+    </script>
+</body>
+</html>

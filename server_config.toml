@@ -4,3 +4,7 @@
 # port — UDP-порт (QUIC)
 ip = "0.0.0.0"
 port = 6000
+webtransport_port = 6001
+# webtransport_sans = ["localhost", "127.0.0.1", "::1", "your.domain"]
+# tls_cert_pem = "/etc/letsencrypt/live/your.domain/fullchain.pem"
+# tls_key_pem = "/etc/letsencrypt/live/your.domain/privkey.pem"

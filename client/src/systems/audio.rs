@@ -82,12 +82,7 @@ pub struct AudioRng(u64);
 
 impl Default for AudioRng {
     fn default() -> Self {
-        // сид из времени запуска — чтобы порядок клипов отличался между сессиями
-        let seed = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos() as u64)
-            .unwrap_or(0x1234_5678)
-            | 1;
+        let seed = crate::platform::now_nanos() ^ crate::platform::random_u64() | 1;
         Self(seed)
     }
 }

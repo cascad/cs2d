@@ -3,16 +3,21 @@ mod config;
 mod console;
 mod constants;
 mod events;
+mod platform;
 mod render;
 mod resources;
 mod systems;
 mod ui;
 
 mod app_state;
+#[cfg(not(target_arch = "wasm32"))]
 mod lobby;
 mod lynet;
 mod menu;
 mod pause_menu;
+#[cfg(target_arch = "wasm32")]
+mod wasm_boot;
+mod wasm_boot_plugin;
 
 use bevy::log::{Level, LogPlugin};
 use bevy::prelude::*;
@@ -59,32 +64,36 @@ use crate::{
     ui::status_effects::{setup_status_effects_ui, update_status_effects_ui},
 };
 
-/// Где искать ассеты. Один и тот же бинарь должен работать и из исходников
-/// (`cargo run`), и из распакованного релиза (рядом лежит папка `assets`).
-/// Возвращаем АБСОЛЮТНЫЙ путь — Bevy подставит его как корень источника ассетов.
+/// Где искать ассеты. Native: рядом с exe или `../assets`. Wasm: HTTP-путь `assets/`.
 fn asset_root() -> String {
-    use std::path::PathBuf;
-    // 1) рядом с исполняемым файлом: <каталог exe>/assets (распакованный zip)
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            let p = dir.join("assets");
-            if p.is_dir() {
-                return p.to_string_lossy().into_owned();
+    #[cfg(target_arch = "wasm32")]
+    {
+        return "assets".to_string();
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        use std::path::PathBuf;
+        if let Ok(exe) = std::env::current_exe() {
+            if let Some(dir) = exe.parent() {
+                let p = dir.join("assets");
+                if p.is_dir() {
+                    return p.to_string_lossy().into_owned();
+                }
             }
         }
+        let dev = PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../assets"));
+        if dev.is_dir() {
+            let clean = std::fs::canonicalize(&dev).unwrap_or(dev);
+            return clean.to_string_lossy().into_owned();
+        }
+        "assets".to_string()
     }
-    // 2) запуск из исходников: <crate>/../assets = assets в корне репозитория.
-    //    Канонизируем, чтобы убрать `..` из середины пути (надёжнее для ридера).
-    let dev = PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../assets"));
-    if dev.is_dir() {
-        let clean = std::fs::canonicalize(&dev).unwrap_or(dev);
-        return clean.to_string_lossy().into_owned();
-    }
-    // 3) запасной вариант — относительный путь от рабочего каталога
-    "assets".to_string()
 }
 
 fn main() {
+    #[cfg(target_arch = "wasm32")]
+    console_error_panic_hook::set_once();
+
     App::new()
         // ресурсы
         // конфиг клиента (ip/port сервера) из файла рядом с бинарём
@@ -116,15 +125,21 @@ fn main() {
         // плагины
         .add_plugins(
             DefaultPlugins
-                // корень ассетов: рядом с бинарём (релиз) или в корне репо (dev)
                 .set(AssetPlugin {
                     file_path: asset_root(),
+                    #[cfg(target_arch = "wasm32")]
+                    meta_check: bevy::asset::AssetMetaCheck::Never,
                     ..default()
                 })
                 .set(WindowPlugin {
                     primary_window: Some(Window {
-                        title: "CS-style Multiplayer Client".into(),
+                        title: "CS2D".into(),
                         resolution: (1024, 768).into(),
+                        // По центру основного монитора (по умолчанию ОС кидает в угол).
+                        // На wasm игнорируется (там канвас, а не окно).
+                        position: WindowPosition::Centered(MonitorSelection::Primary),
+                        #[cfg(target_arch = "wasm32")]
+                        prevent_default_event_handling: true,
                         ..default()
                     }),
                     ..default()
@@ -137,6 +152,9 @@ fn main() {
                     ..default()
                 }),
         )
+        // Фон «пустоты» за пределами комнат: почти чёрный (тьма подземелья).
+        // Дефолтный серо-синий ClearColor ломал атмосферу вокруг карты.
+        .insert_resource(ClearColor(Color::srgb(0.045, 0.04, 0.055)))
         // --- Lightyear: сетевой движок + протокол + наш мост к визуалу ---
         .add_plugins(ClientPlugins {
             tick_duration: netproto::tick_duration(),
@@ -150,6 +168,7 @@ fn main() {
         .insert_state(AppState::Menu)
         .add_plugins(MenuPlugin)
         .add_plugins(crate::pause_menu::PauseMenuPlugin)
+        .add_plugins(crate::wasm_boot_plugin::WasmBootPlugin)
         // --- шрифты грузим заранее (нужны в меню тоже) ---
         .add_systems(Startup, (load_ui_font, setup_console_ui))
         // --- звук: грузим клипы на старте; музыка вкл/выкл по входу/выходу с карты ---

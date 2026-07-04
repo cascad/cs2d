@@ -88,6 +88,37 @@ impl DamageAttribution {
     }
 }
 
+/// WORKAROUND (lightyear 0.26.4, несколько Server-сущностей): штатная система
+/// `lightyear_inputs::server::update_action_state` объявляет параметр
+/// `Single<(Entity, Has<HostServer>), With<Started>>`. У нас ДВА листенера
+/// (UDP :6000 + WebTransport :6001) — `Single` при двух Started-серверах не
+/// резолвится, и Bevy МОЛЧА пропускает всю систему: ввод из `InputBuffer`
+/// никогда не попадает в `ActionState`, сервер симулирует всех игроков с пустым
+/// вводом (позиция стоит на споне), а клиентов каждый тик откатывает назад —
+/// «рубербендинг» и у нативного, и у браузерного клиента.
+///
+/// Делаем ту же работу сами (логика зеркалит оригинал для выделенного сервера,
+/// history_depth = 1): на каждом тике достаём ввод текущего тика из буфера и
+/// подрезаем старые записи, оставляя текущую как fallback при потере пакетов.
+/// Если апстрим починит `Single` — обе системы станут идемпотентны (пишут одно
+/// и то же значение), конфликтов не будет. Регистрируется в `FixedPreUpdate`
+/// сервера (см. `server/src/main.rs`).
+pub fn apply_player_inputs(
+    timeline: Res<lightyear::prelude::LocalTimeline>,
+    mut q: Query<(
+        &mut ActionState<NetInput>,
+        &mut lightyear::input::input_buffer::InputBuffer<ActionState<NetInput>, NetInput>,
+    )>,
+) {
+    let tick = timeline.tick();
+    for (mut state, mut buffer) in &mut q {
+        if let Some(snapshot) = buffer.get(tick) {
+            *state = snapshot.clone();
+        }
+        buffer.pop(tick - 1);
+    }
+}
+
 /// Авторитетный тик: шагаем всех игроков по вводу (со скольжением вдоль стен),
 /// расталкиваем пересекающиеся пары, затем резолвим удары/станы этого тика.
 #[allow(clippy::type_complexity)]

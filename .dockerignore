@@ -1,0 +1,9 @@
+# Контекст docker-сборки сервера (deploy/Dockerfile): бинарю не нужны
+# ни ассеты, ни wasm-артефакты — только исходники workspace + vendor/.
+target
+dist
+assets
+.git
+certificates
+deploy/data
+*.png

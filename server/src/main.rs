@@ -6,6 +6,7 @@
 
 mod config;
 mod net;
+mod wt_cert;
 
 use core::net::SocketAddr;
 use core::time::Duration;
@@ -20,9 +21,11 @@ use lightyear::prelude::*;
 
 use config::ServerConfig;
 use net::{MetaPlayerCount, start_meta_endpoint};
+use wt_cert::{write_digest_file, WtIdentity};
 use netproto::{
     Accounts, DamageAttribution, FxOut, MapGrids, NpcGrowls, NpcRespawns, PRIVATE_KEY,
-    PROTOCOL_ID,     PendingStrikes, Player, ProtocolPlugin, ScoreboardDirty, Strikes, flush_fx,
+    PROTOCOL_ID,     PendingStrikes, Player, ProtocolPlugin, ScoreboardDirty, Strikes,
+    apply_player_inputs, flush_fx,
     broadcast_scoreboard, npc_ai, npc_growls, on_disconnect_cleanup, resolve_player_deaths,
     respawn_npcs, respawn_players, server_handle_auth, server_simulate, spawn_grenades, spawn_npc,
     tick_duration, update_grenades, update_interest,
@@ -51,7 +54,9 @@ fn main() {
         // lightyear_udp=off: на Windows после дисконнекта клиента recv ловит
         // WSAECONNRESET (10054) на КАЖДЫЙ пакет до таймаута netcode — сотни
         // строк ERROR-спама в секунду без пользы (соединение и так закрывается).
-        filter: "server=info,netproto=info,lightyear_udp=off".into(),
+        // aeronet_webtransport=debug: видно дропы датаграмм («larger than MTU»)
+        // с фактическим packet_len и mtu — диагностика браузерного клиента.
+        filter: "server=info,netproto=info,lightyear_udp=off,aeronet_webtransport=debug".into(),
         ..Default::default()
     });
     app.add_plugins(ServerPlugins {
@@ -72,6 +77,9 @@ fn main() {
     app.init_resource::<NpcGrowls>();
 
     app.add_systems(Startup, (start_server, spawn_npcs));
+    // Ввод игроков из InputBuffer → ActionState: обход бага lightyear с двумя
+    // Server-сущностями (см. netproto::apply_player_inputs).
+    app.add_systems(FixedPreUpdate, apply_player_inputs);
     // Авторитетный тик: движение+бой → ИИ неписей → спавн гранат → физика гранат →
     // единая точка смертей (PvP/NPC/гранаты).
     app.add_systems(
@@ -104,28 +112,59 @@ fn main() {
         update_interest.before(ReplicationBufferSystems::Buffer),
     );
 
+    // Диагностика (env CS2D_TICKLOG=1): каждый тик пишет позицию игроков с
+    // номером тика — для сверки с предсказанием клиента (off-by-one и т.п.).
+    if std::env::var("CS2D_TICKLOG").is_ok() {
+        app.add_systems(
+            FixedUpdate,
+            debug_ticklog
+                .after(server_simulate)
+                .before(resolve_player_deaths),
+        );
+    }
+
     app.add_observer(on_new_client);
     app.add_observer(on_disconnect_cleanup);
     app.run();
 }
 
-/// Поднимаем netcode-сервер на UDP-порту из конфига.
+/// Поднимаем netcode-сервер: UDP (нативный клиент) + WebTransport (браузер).
 fn start_server(mut commands: Commands, cfg: Res<ServerConfig>) {
-    let server_addr = SocketAddr::new(cfg.ip_addr(), cfg.port);
-    let entity = commands
+    let netcode_cfg = NetcodeConfig {
+        protocol_id: PROTOCOL_ID,
+        private_key: PRIVATE_KEY,
+        ..default()
+    };
+
+    // --- UDP ---
+    let udp_addr = SocketAddr::new(cfg.ip_addr(), cfg.port);
+    let udp_entity = commands
         .spawn((
-            Name::from("Server"),
-            NetcodeServer::new(NetcodeConfig {
-                protocol_id: PROTOCOL_ID,
-                private_key: PRIVATE_KEY,
-                ..default()
-            }),
-            LocalAddr(server_addr),
+            Name::from("ServerUdp"),
+            NetcodeServer::new(netcode_cfg.clone()),
+            LocalAddr(udp_addr),
             ServerUdpIo::default(),
         ))
         .id();
-    commands.trigger(Start { entity });
-    info!("server listening on udp {server_addr}");
+    commands.trigger(Start { entity: udp_entity });
+    info!("server listening on udp {udp_addr}");
+
+    // --- WebTransport ---
+    let wt = WtIdentity::from_config(&cfg);
+    write_digest_file(&wt.digest);
+    let wt_addr = SocketAddr::new(cfg.ip_addr(), cfg.webtransport_port);
+    let wt_entity = commands
+        .spawn((
+            Name::from("ServerWebTransport"),
+            NetcodeServer::new(netcode_cfg),
+            LocalAddr(wt_addr),
+            WebTransportServerIo {
+                certificate: wt.identity,
+            },
+        ))
+        .id();
+    commands.trigger(Start { entity: wt_entity });
+    info!("server listening on webtransport {wt_addr}");
 }
 
 /// Спавним неписей из точек спавна общей карты (чередуем скелет/зомби).
@@ -156,4 +195,14 @@ fn on_new_client(trigger: On<Add, LinkOf>, mut commands: Commands) {
 /// Обновляем счётчик игроков для меты лобби (число сущностей-игроков).
 fn update_meta_player_count(meta: Res<MetaPlayerCount>, players: Query<(), With<Player>>) {
     meta.0.store(players.iter().count() as u32, Ordering::Relaxed);
+}
+
+/// Диагностика CS2D_TICKLOG: тик и позиция каждого игрока после server_simulate.
+fn debug_ticklog(
+    timeline: Res<LocalTimeline>,
+    players: Query<&netproto::Position, With<Player>>,
+) {
+    for pos in &players {
+        info!("TICKLOG srv tick={:?} x={:.3} y={:.3}", timeline.tick(), pos.0.x, pos.0.y);
+    }
 }

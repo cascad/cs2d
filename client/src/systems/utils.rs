@@ -1,9 +1,7 @@
 use bevy::prelude::*;
 
 pub fn time_in_seconds() -> f64 {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
-    now.as_secs_f64()
+    crate::platform::now_secs_f64()
 }
 
 pub fn lerp_angle(a: f32, b: f32, t: f32) -> f32 {

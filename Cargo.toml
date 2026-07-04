@@ -7,6 +7,18 @@ members = [
 ]
 resolver = "2"  # свежий алгоритм feature‑unification
 
+# lightyear_transport с MAX_PACKET_SIZE 1200→1024: штатные пакеты не влезали в
+# датаграмму WebTransport (QUIC path MTU ~1200 минус заголовки) и молча дропались
+# сервером — браузерный клиент коннектился, но репликация не приходила.
+#
+# lightyear_replication: поддержка НЕСКОЛЬКИХ Server-сущностей (у нас два
+# листенера: UDP + WebTransport). Оригинальный `.single::<&Server>()` при двух
+# серверах молча выходил — PredictionTarget/InterpolationTarget не проставляли
+# флаги ни одному клиенту (игрок без Predicted → нет визуала/камеры/ввода).
+[patch.crates-io]
+lightyear_transport = { path = "vendor/lightyear_transport" }
+lightyear_replication = { path = "vendor/lightyear_replication" }
+
 # === workspace‑wide version overrides ===
 [workspace.dependencies]
 windows      = "0.58.0"
