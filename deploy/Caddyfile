@@ -13,8 +13,12 @@
 
 	# /certificates/digest.txt — ЖИВОЙ digest из каталога игрового сервера
 	# (протухший digest из сборки dist/ сюда не попадает: см. WEB_CLIENT.md).
+	# no-store ОБЯЗАТЕЛЕН: digest меняется при каждом рестарте game, а браузер
+	# без этого заголовка кэширует файл эвристически — после рестарта клиент
+	# коннектился бы со старым digest (TLS certificate unknown) даже после F5.
 	handle_path /certificates/* {
 		root * /srv/live-certificates
+		header Cache-Control "no-store"
 		file_server
 	}
 
