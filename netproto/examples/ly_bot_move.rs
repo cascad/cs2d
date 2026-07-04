@@ -87,6 +87,9 @@ fn connect_client(mut commands: Commands) {
         auth,
         NetcodeConfig {
             client_timeout_secs: 5,
+            // как в клиенте: токен живёт час, иначе сдвиг часов бот↔сервер
+            // > 30с даёт ложный «connection request timed out»
+            token_expire_secs: 3600,
             ..default()
         },
     )

@@ -30,6 +30,11 @@ services:
       - ./data/certificates:/app/certificates
       # свой конфиг (опционально): раскомментируйте и положите файл рядом
       # - ./server_config.toml:/app/server_config.toml
+    environment:
+      # Диагностика: прокидывается С ХОСТА, если задана. Пример:
+      #   sudo RUST_LOG="info,lightyear_netcode=debug" docker compose up -d --force-recreate game
+      # (bevy LogPlugin: RUST_LOG переопределяет встроенный фильтр логов)
+      - RUST_LOG
 
   web:
     image: caddy:2
