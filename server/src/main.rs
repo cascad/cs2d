@@ -68,6 +68,7 @@ fn main() {
     // рядом с рабочим каталогом (в docker — том ./data/state, переживает рестарты).
     app.insert_resource(netproto::ServerLimits {
         max_players: cfg.max_players,
+        afk_kick_secs: cfg.afk_kick_secs,
     });
     let accounts_path = std::path::PathBuf::from("state/accounts.json");
     app.insert_resource(netproto::load_accounts(&accounts_path));
@@ -104,6 +105,8 @@ fn main() {
         )
             .chain(),
     );
+    // Кик за бездействие: тикает по фиксированному тику (по вводу игроков).
+    app.add_systems(FixedUpdate, netproto::kick_afk_players.after(server_simulate));
     // Сообщения: авторизация, таблица очков, FX; плюс счётчик игроков для лобби.
     app.add_systems(
         Update,

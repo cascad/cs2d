@@ -31,6 +31,9 @@ pub struct Accounts(pub AccountBook);
 #[derive(Resource, Default)]
 pub struct ServerLimits {
     pub max_players: u32,
+    /// Кик за бездействие (сек): ничего не нажато и прицел не двигался дольше
+    /// этого времени → предупреждение и отключение. `0` — выключено.
+    pub afk_kick_secs: f32,
 }
 
 /// Путь к файлу персистентности аккаунтов (вставляет `server/main.rs`).
@@ -197,6 +200,74 @@ pub fn server_handle_auth(
             }
         }
     }
+}
+
+/// Кик за бездействие: соединение живо (вкладка открыта), но игрок не подаёт
+/// НИКАКОГО ввода (кнопки не нажаты, прицел не двигается) дольше
+/// `ServerLimits::afk_kick_secs`. За ~2с до кика клиенту уходит `AuthDenied`
+/// с причиной (наш клиент по нему сам выходит на стартовый экран и НЕ
+/// автопереподключается); затем на линк вешается `Disconnecting` — lightyear
+/// шлёт disconnect-пакеты и через кадр деспавнит линк с `Disconnected`
+/// (срабатывает обычная очистка: деспавн игрока, unbind аккаунта, скорборд).
+#[allow(clippy::type_complexity)]
+pub fn kick_afk_players(
+    limits: Option<Res<ServerLimits>>,
+    players: Query<(
+        Entity,
+        &lightyear::prelude::input::native::ActionState<crate::NetInput>,
+        &ControlledBy,
+    ), With<Player>>,
+    mut senders: Query<&mut MessageSender<AuthDenied>>,
+    mut state: Local<std::collections::HashMap<Entity, (crate::NetInput, f32, bool)>>,
+    mut commands: Commands,
+) {
+    use protocol::constants::TICK_DT;
+    let kick_after = limits.as_deref().map(|l| l.afk_kick_secs).unwrap_or(0.0);
+    if kick_after <= 0.0 {
+        return;
+    }
+    let warn_at = (kick_after - 2.0).max(0.0);
+
+    let mut alive: Vec<Entity> = Vec::new();
+    for (e, action, controlled) in &players {
+        alive.push(e);
+        let inp = action.0;
+        let entry = state.entry(e).or_insert((inp, 0.0, false));
+        let active = inp.up
+            || inp.down
+            || inp.left
+            || inp.right
+            || inp.attack
+            || inp.block
+            || inp.dash
+            || inp.stun
+            || inp.throw.is_some()
+            || (inp.aim - entry.0.aim).abs() > 0.005;
+        entry.0 = inp;
+        if active {
+            entry.1 = 0.0;
+            entry.2 = false;
+            continue;
+        }
+        entry.1 += TICK_DT;
+        if entry.1 >= warn_at && !entry.2 {
+            entry.2 = true;
+            if let Ok(mut s) = senders.get_mut(controlled.owner) {
+                s.send::<AuthChannel>(AuthDenied {
+                    reason: format!("отключён за бездействие ({kick_after:.0}с)"),
+                });
+            }
+            info!("AFK warn: {e:?} (idle {:.0}s)", entry.1);
+        }
+        if entry.1 >= kick_after {
+            info!("AFK kick: {e:?}");
+            commands
+                .entity(controlled.owner)
+                .insert(lightyear::connection::client::Disconnecting);
+            entry.1 = f32::MIN; // не спамим Disconnecting, пока линк доживает кадр
+        }
+    }
+    state.retain(|e, _| alive.contains(e));
 }
 
 /// Рассылка таблицы очков всем клиентам, когда она изменилась. Заодно — точка

@@ -34,10 +34,18 @@ pub struct ServerConfig {
     /// `0` — без лимита (НЕ рекомендуется для публичного сервера).
     #[serde(default = "default_max_players")]
     pub max_players: u32,
+    /// Кик за бездействие (сек): ввод не менялся дольше этого времени →
+    /// предупреждение и отключение. `0` — выключено.
+    #[serde(default = "default_afk_kick_secs")]
+    pub afk_kick_secs: f32,
 }
 
 fn default_max_players() -> u32 {
     16
+}
+
+fn default_afk_kick_secs() -> f32 {
+    60.0
 }
 
 fn default_webtransport_port() -> u16 {
@@ -67,6 +75,7 @@ impl Default for ServerConfig {
             tls_key_pem: None,
             name: default_name(),
             max_players: default_max_players(),
+            afk_kick_secs: default_afk_kick_secs(),
         }
     }
 }
