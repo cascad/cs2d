@@ -79,6 +79,12 @@ pub struct PendingDiscrete {
 #[derive(Resource, Default)]
 pub struct PrevHp(pub HashMap<u64, i32>);
 
+/// Последний выход в меню случился из-за ОТКАЗА авторизации (не тот пароль /
+/// сервер полон / пустое имя). Отличает «ретраить бессмысленно, нужен ввод
+/// пользователя» от сетевых обрывов, которые wasm-клиент переигрывает сам.
+#[derive(Resource, Default)]
+pub struct AuthRejected(pub bool);
+
 /// Маркер визуальной гранаты (на реплицируемой сущности `NetGrenade`).
 #[derive(Component)]
 pub struct GrenadeViz;
@@ -125,6 +131,7 @@ impl Plugin for LyNetPlugin {
             .init_resource::<HelloSent>()
             .init_resource::<PendingDiscrete>()
             .init_resource::<PrevHp>()
+            .init_resource::<AuthRejected>()
             // Карта для ПРЕДСКАЗАНИЯ движения: те же стены, что у сервера. Без неё
             // клиент предсказывал бы проход сквозь стены → откаты/дёрганье у стен.
             .init_resource::<MapGrids>();
@@ -326,6 +333,7 @@ fn recv_auth(
     state: Res<State<AppState>>,
     mut next: ResMut<NextState<AppState>>,
     mut err: ResMut<crate::menu::ConnectError>,
+    mut rejected: ResMut<AuthRejected>,
 ) {
     for mut r in &mut ok {
         for _ in r.receive() {
@@ -339,6 +347,7 @@ fn recv_auth(
         for m in r.receive() {
             warn!("[ly] AUTH DENIED: {}", m.reason);
             err.0 = Some(format!("Авторизация отклонена: {}", m.reason));
+            rejected.0 = true;
             next.set(AppState::Menu);
         }
     }

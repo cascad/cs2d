@@ -7,8 +7,11 @@ public_url = "/"
 release = true
 
 [watch]
-# Следим за кодом клиента и digest'ом сервера; assets не триггерят пересборку.
-watch = [".", "../certificates/digest.txt", "../netproto", "../protocol"]
+# Следим за кодом клиента и общих крейтов; assets не триггерят пересборку.
+# digest'а сервера в списке НЕТ намеренно: его смена запускала бы полную
+# release-пересборку wasm (минуты), а живой файл в dist/ теперь обновляет сам
+# сервер при старте (см. server/src/wt_cert.rs::write_digest_file).
+watch = [".", "../netproto", "../protocol"]
 
 [serve]
 addresses = ["127.0.0.1"]

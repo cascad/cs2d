@@ -78,9 +78,35 @@ fn pos_should_rollback(confirmed: &Position, predicted: &Position) -> bool {
     confirmed.0.distance_squared(predicted.0) > 1.0
 }
 
-/// Аналогично для поворота: откат только при заметной разнице угла (~0.6°).
+/// Поворот: откат только при ЗАМЕТНОЙ разнице (~3°). Прицел (aim) меняется
+/// каждый тик движения мыши, и на реальном RTT сервер закономерно применяет его
+/// на ±1 тик позже клиента — разница составляет до turn_rate·dt ≈ 0.21 рад.
+/// Прежний порог 0.01 рад (0.6°) превращал КАЖДЫЙ пакет в откат — визуальный
+/// поворот «мылился» коррекцией и казался страшно неотзывчивым (в браузере на
+/// проде особенно). 3° глазом неразличимы, сервер остаётся авторитетом.
 fn rot_should_rollback(confirmed: &Rotation, predicted: &Rotation) -> bool {
-    (confirmed.0 - predicted.0).abs() > 0.01
+    use core::f32::consts::{PI, TAU};
+    ((confirmed.0 - predicted.0 + PI).rem_euclid(TAU) - PI).abs() > 0.05
+}
+
+/// AbilityState сравнивался ПОБАЙТОВО (PartialEq): любое f32-расхождение из-за
+/// сдвига применения ввода на ±1 тик (facing/стамина/КД) вызывало откат каждый
+/// пакет — вместе с жёстким порогом Rotation это и давало «ватный» поворот.
+/// Сравниваем с допусками: реальная рассинхронизация (сработала способность,
+/// большой дрейф) откатится, микродрейф — нет.
+fn abil_should_rollback(confirmed: &AbilityState, predicted: &AbilityState) -> bool {
+    use core::f32::consts::{PI, TAU};
+    let (c, p) = (&confirmed.0, &predicted.0);
+    let ang = |a: f32, b: f32| ((a - b + PI).rem_euclid(TAU) - PI).abs();
+    ang(c.facing, p.facing) > 0.05
+        || (c.stamina - p.stamina).abs() > 2.0
+        || (c.dash_cd_left - p.dash_cd_left).abs() > 0.05
+        || (c.melee_cd_left - p.melee_cd_left).abs() > 0.05
+        || (c.stun_cd_left - p.stun_cd_left).abs() > 0.05
+        || (c.attack_lock_left - p.attack_lock_left).abs() > 0.05
+        || (c.stun_left - p.stun_left).abs() > 0.05
+        || (c.dash_left - p.dash_left).abs() > 0.05
+        || (c.block_charge - p.block_charge).abs() > 0.05
 }
 
 /// Плагин протокола: регистрирует реплицируемые компоненты, нативный инпут и
@@ -122,11 +148,13 @@ impl Plugin for ProtocolPlugin {
             .add_should_rollback(pos_should_rollback)
             .add_linear_interpolation()
             .add_linear_correction_fn();
+        // Rotation БЕЗ correction-фн: коррекция визуально «долизывала» поворот
+        // ~200 мс после каждого отката — прицел ощущался ватным. Реслимуляция
+        // отката и так даёт почти точный угол; редкий снап на ≥3° незаметен.
         app.register_component::<Rotation>()
             .add_prediction()
             .add_should_rollback(rot_should_rollback)
-            .add_linear_interpolation()
-            .add_linear_correction_fn();
+            .add_linear_interpolation();
         // Геймплейное состояние: предсказываем у локального игрока (rollback) и
         // снап-«интерполируем» у удалённых, чтобы HP/способности/блок были доступны
         // на интерполируемых сущностях (полоски HP, анимации удара/рывка, атрибуция
@@ -136,6 +164,7 @@ impl Plugin for ProtocolPlugin {
             .add_interpolation_with(snap::<Health>);
         app.register_component::<AbilityState>()
             .add_prediction()
+            .add_should_rollback(abil_should_rollback)
             .add_interpolation_with(snap::<AbilityState>);
         app.register_component::<Blocking>()
             .add_prediction()

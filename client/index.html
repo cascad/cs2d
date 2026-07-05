@@ -124,6 +124,29 @@
             font-size: 12px;
             color: #8d8798;
         }
+        #bar {
+            margin: 10px 0 0;
+            height: 6px;
+            border-radius: 3px;
+            background: rgba(255, 255, 255, 0.08);
+            overflow: hidden;
+        }
+        #fill {
+            height: 100%;
+            width: 8%;
+            border-radius: 3px;
+            background: linear-gradient(90deg, #2fae5e, #52e388);
+            transition: width 0.25s ease;
+        }
+        #fill.pulse { animation: pulse 1.2s ease-in-out infinite; }
+        @keyframes pulse {
+            0%, 100% { opacity: 0.45; }
+            50% { opacity: 1.0; }
+        }
+        #play[disabled] {
+            filter: grayscale(0.7) brightness(0.6);
+            cursor: default;
+        }
         #fs {
             position: absolute;
             right: 16px;
@@ -198,11 +221,12 @@
                    placeholder="Имя (пусто — случайное)" />
             <input id="pass" type="password" autocomplete="current-password"
                    placeholder="Пароль (необязательно)" />
-            <button id="play">ИГРАТЬ</button>
+            <button id="play" disabled>ЗАГРУЗКА…</button>
             <div id="err"></div>
             <div id="hint">Пароль закрепляет имя за тобой: первый вход регистрирует,
                 дальше — сверяется. Без пароля имя может занять кто угодно.</div>
             <div id="boot">загрузка движка…</div>
+            <div id="bar"><div id="fill" class="pulse"></div></div>
         </div>
         <button id="fs" title="Полный экран">⛶ на весь экран</button>
     </div>
@@ -214,10 +238,50 @@
 
         nameEl.value = localStorage.getItem("cs2d_name") || "";
 
-        // Готовность wasm: Trunk кидает событие, когда движок стартовал.
+        // ── Загрузка → готовность → ИГРАТЬ ──────────────────────────────
+        // Никаких таймерных эвристик: движок сам сообщает РЕАЛЬНОЕ состояние.
+        // Фаза 1 «загрузка движка» (wasm качается/инстанцируется) — полоска
+        // пульсирует. Фаза 2: полоса = __cs2dProgress (доля загруженных
+        // ассетов из AssetServer), готовность = __cs2dReady (все ассеты
+        // на месте И FPS устойчиво ≥ 45 — прямое наблюдение плавности).
+        const fillEl = $("fill");
+        const tStart = performance.now();
+        let engineStarted = false;
+
         window.addEventListener("TrunkApplicationStarted", () => {
-            bootEl.style.display = "none";
+            engineStarted = true;
+            bootEl.textContent = "загрузка ресурсов…";
+            fillEl.classList.remove("pulse");
         });
+
+        const gate = setInterval(() => {
+            if (!engineStarted) return; // wasm ещё грузится, полоска пульсирует
+            const p = typeof window.__cs2dProgress === "number" ? window.__cs2dProgress : 0;
+            fillEl.style.width = (8 + p * 92).toFixed(1) + "%";
+            const failsafe = performance.now() - tStart > 45000;
+            if (window.__cs2dReady === true || failsafe) {
+                clearInterval(gate);
+                fillEl.style.width = "100%";
+                bootEl.style.display = "none";
+                setTimeout(() => { $("bar").style.display = "none"; }, 400);
+                playBtn.disabled = false;
+                playBtn.textContent = "ИГРАТЬ";
+                nameEl.focus();
+            }
+        }, 150);
+
+        // Клавиатурный фокус — канвасу: иначе после клика по кнопке WASD/G не
+        // работают, пока игрок не кликнет в игру (удар/дэш). Канвас может ещё
+        // не существовать (wasm грузится) — повторяем, пока не появится.
+        const focusCanvas = () => {
+            const c = document.querySelector("canvas");
+            if (c) { c.focus(); return; }
+            const t = setInterval(() => {
+                const c2 = document.querySelector("canvas");
+                if (c2) { c2.focus(); clearInterval(t); }
+            }, 100);
+            setTimeout(() => clearInterval(t), 15000);
+        };
 
         playBtn.addEventListener("click", () => {
             const name = nameEl.value.trim().slice(0, 24);
@@ -226,8 +290,10 @@
             // Сигнал wasm-клиенту (см. client/src/wasm_boot.rs js_start_request):
             // он подхватит имя/пароль и начнёт подключение. Этот же клик — жест
             // пользователя, разбудивший AudioContext (звук будет сразу).
-            window.__cs2dStart = { name, password: passEl.value };
+            // nonce отличает ручной клик от автопереподключений клиента.
+            window.__cs2dStart = { name, password: passEl.value, nonce: Date.now() };
             overlay.style.display = "none";
+            focusCanvas();
         });
         nameEl.addEventListener("keydown", (e) => { if (e.key === "Enter") playBtn.click(); });
         passEl.addEventListener("keydown", (e) => { if (e.key === "Enter") playBtn.click(); });

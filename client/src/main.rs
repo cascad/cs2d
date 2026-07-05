@@ -134,15 +134,12 @@ fn main() {
                 .set(WindowPlugin {
                     primary_window: Some(Window {
                         title: "CS2D".into(),
-                        resolution: {
-                            let r: bevy::window::WindowResolution = (1024, 768).into();
-                            // Браузер: рендерим в CSS-пикселях, а не в физических.
-                            // На ретине (dpr=2) канвас иначе рисуется в 4× пикселей —
-                            // слабой интегрированной графике это не по силам.
-                            #[cfg(target_arch = "wasm32")]
-                            let r = r.with_scale_factor_override(1.0);
-                            r
-                        },
+                        // scale_factor_override на wasm НЕ ставить: проверено
+                        // пробой [cur] при dpr=2 — физический буфер рендера
+                        // ОДИНАКОВ с ним и без него (3968×2498), т.е. GPU он не
+                        // экономит, а курсор согласован в обоих режимах. Зато
+                        // override ломает масштаб UI на hidpi (в 2 раза мельче).
+                        resolution: (1024, 768).into(),
                         // Ниже этого UI разваливается (HUD/полоски перекрываются).
                         resize_constraints: bevy::window::WindowResizeConstraints {
                             min_width: 800.0,
@@ -186,6 +183,10 @@ fn main() {
         .add_plugins(MenuPlugin)
         .add_plugins(crate::pause_menu::PauseMenuPlugin)
         .add_plugins(crate::wasm_boot_plugin::WasmBootPlugin)
+        // FPS-счётчик (правый верхний угол, во всех состояниях).
+        .add_plugins(bevy::diagnostic::FrameTimeDiagnosticsPlugin::default())
+        .add_systems(Startup, crate::ui::fps_hud::setup_fps_hud)
+        .add_systems(Update, crate::ui::fps_hud::update_fps_hud)
         // --- шрифты грузим заранее (нужны в меню тоже) ---
         .add_systems(Startup, (load_ui_font, setup_console_ui))
         // --- звук: грузим клипы на старте; музыка вкл/выкл по входу/выходу с карты ---

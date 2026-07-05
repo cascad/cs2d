@@ -121,6 +121,10 @@ pub fn project_world_to_transform(
 /// учётом камеры и обратной проекции (для изометрии — через [`screen_to_world`]).
 pub fn pointer_world(window: &Window, camera: &Camera, cam_tf: &GlobalTransform) -> Option<Vec2> {
     let cursor = window.cursor_position()?;
+    // ВАЖНО: cursor_position() уже в ЛОГИЧЕСКИХ пикселях при любом масштабе
+    // экрана (проверено headless Chrome --force-device-scale-factor=1|2 против
+    // [cur]-диагностики в heartbeat) — НЕ «поправлять» его на scale_factor.
+    // А вот scale_factor_override(1.0) на окне ломает соответствие — не ставить.
     let screen = camera.viewport_to_world_2d(cam_tf, cursor).ok()?;
     Some(screen_to_world(screen))
 }

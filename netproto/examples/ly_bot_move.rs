@@ -189,13 +189,35 @@ fn on_connected(trigger: On<Add, Connected>) {
 
 /// Режимы: BOT_MODE=move (влево по коридору, прицел фиксирован) |
 /// aim (стоим, прицел вращается) | move_aim (и то и другое, по умолчанию) |
-/// patrol (туда-сюда по 8с — сущности выходят из зоны интереса и возвращаются:
-/// проверка повторной репликации после тумана войны).
+/// patrol (туда-сюда по 8с — проверка повторной репликации после тумана) |
+/// nade (стоим и раз в ~6с бросаем гранату на BOT_NADE_DIST юнитов вправо —
+/// замер серверного таймлайна «бросок → взрыв»).
 fn buffer_input(
     time: Res<Time>,
     mut q: Query<&mut ActionState<NetInput>, With<InputMarker<NetInput>>>,
+    me: Query<&Position, With<Predicted>>,
+    mut thrown_at: Local<f32>,
 ) {
     let mode = std::env::var("BOT_MODE").unwrap_or_else(|_| "move_aim".into());
+    if mode == "nade" {
+        if let Ok(mut action) = q.single_mut() {
+            let t = time.elapsed_secs();
+            let mut throw = None;
+            if t - *thrown_at > 6.0 {
+                if let Ok(pos) = me.single() {
+                    let dist: f32 = std::env::var("BOT_NADE_DIST")
+                        .ok()
+                        .and_then(|s| s.parse().ok())
+                        .unwrap_or(150.0);
+                    throw = Some(pos.0 + Vec2::new(dist, 0.0));
+                    *thrown_at = t;
+                    info!("BOT THROW -> {:?}", throw);
+                }
+            }
+            action.0 = NetInput { aim: 0.0, throw, ..default() };
+        }
+        return;
+    }
     if let Ok(mut action) = q.single_mut() {
         let t = time.elapsed_secs();
         let aim = if mode == "move" || mode == "patrol" {

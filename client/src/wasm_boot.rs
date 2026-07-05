@@ -16,12 +16,23 @@ use crate::menu::{do_connect, ConnectError, ConnectTimeout};
 #[derive(Resource, Default)]
 pub struct RuntimeCertDigest(pub Option<String>);
 
+/// Максимум автопопыток переподключения подряд (потом — стартовый экран с
+/// ошибкой; счётчик сбрасывается при входе в игру и по кнопке «Играть»).
+const RECONNECT_MAX_ATTEMPTS: u32 = 30;
+
 #[derive(Resource)]
 struct WasmBootState {
     phase: WasmBootPhase,
     digest_slot: Arc<Mutex<Option<Result<String, String>>>>,
     fetch_started: bool,
     status: String,
+    /// Номер текущей автопопытки переподключения (0 = обычный коннект).
+    attempts: u32,
+    /// Момент (Time::elapsed_secs_f64), раньше которого новую попытку не начинаем.
+    retry_at: f64,
+    /// nonce из `__cs2dStart` последней обработанной кнопки «Играть»: смена
+    /// nonce = игрок нажал кнопку сам → счётчик попыток обнуляется.
+    last_nonce: f64,
 }
 
 impl Default for WasmBootState {
@@ -31,6 +42,9 @@ impl Default for WasmBootState {
             digest_slot: Arc::new(Mutex::new(None)),
             fetch_started: false,
             status: "Запуск…".into(),
+            attempts: 0,
+            retry_at: 0.0,
+            last_nonce: 0.0,
         }
     }
 }
@@ -57,8 +71,11 @@ impl Plugin for WasmBootPlugin {
         app.init_resource::<RuntimeCertDigest>()
             .init_resource::<WasmBootState>()
             .add_systems(Startup, (hide_html_loading, setup_wasm_status_ui))
-            .add_systems(OnEnter(AppState::Menu), reset_wasm_boot)
+            // При возврате из игры (обрыв) статус-UI пересоздаётся: его камера/
+            // текст удаляются на входе в игру.
+            .add_systems(OnEnter(AppState::Menu), (setup_wasm_status_ui, reset_wasm_boot))
             .add_systems(OnEnter(AppState::InGame), hide_wasm_status_ui)
+            .add_observer(on_disconnected_ingame)
             .add_systems(
                 Update,
                 (
@@ -67,6 +84,7 @@ impl Plugin for WasmBootPlugin {
                         .run_if(in_state(AppState::Menu).or(in_state(AppState::Connecting))),
                     wasm_heartbeat,
                     wasm_move_probe,
+                    wasm_warmup_probe,
                 ),
             );
     }
@@ -92,6 +110,8 @@ fn wasm_heartbeat(
     links: Query<&lightyear::prelude::Link, With<lightyear::prelude::Client>>,
     timeline: Res<lightyear::prelude::LocalTimeline>,
     metrics: Option<Res<lightyear::prediction::diagnostics::PredictionMetrics>>,
+    aim: Res<crate::resources::AimAngle>,
+    windows: Query<&Window>,
 ) {
     *frames += 1;
     let now = time.elapsed_secs_f64();
@@ -121,7 +141,7 @@ fn wasm_heartbeat(
         .unwrap_or_else(|| "rtt=?".into());
     let (rb, rbt) = metrics.map(|m| (m.rollbacks, m.rollback_ticks)).unwrap_or((0, 0));
     info!(
-        "[hb] frame={} fps={:.1} state={:?} plr[{}] pred={} my_got={} cam[{}] {} tick={:?} speed={:.3} rollbacks={} rb_ticks={}",
+        "[hb] frame={} fps={:.1} state={:?} plr[{}] pred={} my_got={} cam[{}] {} tick={:?} speed={:.3} rollbacks={} rb_ticks={} aim={:.3}",
         *frames,
         fps,
         state.get(),
@@ -134,9 +154,101 @@ fn wasm_heartbeat(
         virt.relative_speed(),
         rb,
         rbt,
+        aim.0,
     );
+    // Диагностика маппинга курсора (масштаб экрана ≠ 100%): сырой курсор,
+    // логический размер окна и scale_factor — сравнивать при разных dpr.
+    if let Ok(w) = windows.single() {
+        let cur = w
+            .cursor_position()
+            .map(|c| format!("({:.0},{:.0})", c.x, c.y))
+            .unwrap_or_else(|| "-".into());
+        info!(
+            "[cur] raw={} logical={:.0}x{:.0} physical={}x{} sf={:.2}",
+            cur,
+            w.width(),
+            w.height(),
+            w.physical_width(),
+            w.physical_height(),
+            w.scale_factor()
+        );
+    }
     *last = now;
     *last_frames = *frames;
+}
+
+/// Готовность движка для лендинга — из РЕАЛЬНОГО состояния, не по таймерам:
+/// 1) все стартовые ассеты загружены (аудио-пулы + музыка + шрифт — статус
+///    каждого хэндла известен AssetServer'у точно); доля загруженного идёт в
+///    `window.__cs2dProgress` (0..1) — из неё лендинг рисует полосу прогресса;
+/// 2) сглаженный FPS держится ≥ 45 хотя бы секунду — прямое наблюдение, что
+///    движок уже крутится плавно (JIT-дожатие wasm браузер никак не раскрывает,
+///    но его эффект виден именно в FPS).
+/// Оба условия выполнены → `window.__cs2dReady = true`, кнопка «ИГРАТЬ» оживает.
+fn wasm_warmup_probe(
+    time: Res<Time>,
+    diagnostics: Res<bevy::diagnostic::DiagnosticsStore>,
+    asset_server: Res<AssetServer>,
+    sfx: Option<Res<crate::systems::audio::Sfx>>,
+    font: Option<Res<crate::resources::UiFont>>,
+    mut done: Local<bool>,
+    mut good_since: Local<f64>,
+) {
+    if *done {
+        return;
+    }
+    let Some(win) = web_sys::window() else { return };
+
+    // Точный статус ассетов: перечисляем все стартовые хэндлы.
+    let mut total = 0usize;
+    let mut loaded = 0usize;
+    let mut count = |id: bevy::asset::UntypedAssetId| {
+        total += 1;
+        if asset_server.is_loaded_with_dependencies(id) {
+            loaded += 1;
+        }
+    };
+    if let Some(sfx) = sfx.as_deref() {
+        for pool in [
+            &sfx.growls, &sfx.attacks, &sfx.deaths, &sfx.flesh, &sfx.body,
+            &sfx.block, &sfx.swing, &sfx.stun, &sfx.dash, &sfx.explosions,
+            &sfx.music,
+        ] {
+            for h in pool {
+                count(h.id().untyped());
+            }
+        }
+    }
+    if let Some(f) = font.as_deref() {
+        count(f.0.id().untyped());
+    }
+    let assets_ready = total > 0 && loaded == total;
+    let _ = js_sys::Reflect::set(
+        &win,
+        &wasm_bindgen::JsValue::from_str("__cs2dProgress"),
+        &wasm_bindgen::JsValue::from_f64(if total == 0 { 0.0 } else { loaded as f64 / total as f64 }),
+    );
+
+    // FPS-условие: не эвристика по времени, а наблюдение фактической плавности.
+    let now = time.elapsed_secs_f64();
+    let fps = diagnostics
+        .get(&bevy::diagnostic::FrameTimeDiagnosticsPlugin::FPS)
+        .and_then(|d| d.smoothed())
+        .unwrap_or(0.0);
+    if fps < 45.0 {
+        *good_since = now;
+    }
+    let fps_ready = now - *good_since >= 1.0;
+
+    if assets_ready && fps_ready {
+        *done = true;
+        let _ = js_sys::Reflect::set(
+            &win,
+            &wasm_bindgen::JsValue::from_str("__cs2dReady"),
+            &wasm_bindgen::JsValue::TRUE,
+        );
+        info!("[wasm] готово: ассеты {loaded}/{total}, fps={fps:.0} (t={now:.1}с)");
+    }
 }
 
 /// Мгновенный лог движения предсказанного игрока (только wasm, для замера
@@ -171,9 +283,10 @@ fn hide_html_loading() {
 }
 
 /// Читает запрос старта со стартового HTML-экрана: `window.__cs2dStart =
-/// {name, password}` выставляет кнопка «Играть» (см. index.html). Пока объекта
-/// нет — игра ждёт (оверлей закрывает канвас).
-fn js_start_request() -> Option<(String, String)> {
+/// {name, password, nonce}` выставляет кнопка «Играть» (см. index.html). Пока
+/// объекта нет — игра ждёт (оверлей закрывает канвас). `nonce` меняется при
+/// каждом клике — по нему авторетраи отличаются от ручного запуска.
+fn js_start_request() -> Option<(String, String, f64)> {
     let win = web_sys::window()?;
     let val = js_sys::Reflect::get(&win, &wasm_bindgen::JsValue::from_str("__cs2dStart")).ok()?;
     if !val.is_object() {
@@ -185,7 +298,11 @@ fn js_start_request() -> Option<(String, String)> {
             .and_then(|v| v.as_string())
             .unwrap_or_default()
     };
-    Some((get("name"), get("password")))
+    let nonce = js_sys::Reflect::get(&val, &wasm_bindgen::JsValue::from_str("nonce"))
+        .ok()
+        .and_then(|v| v.as_f64())
+        .unwrap_or(1.0);
+    Some((get("name"), get("password"), nonce))
 }
 
 /// Возврат на стартовый экран (ошибка авторизации/таймаут/выход в меню):
@@ -207,7 +324,16 @@ fn js_return_to_overlay(msg: Option<&str>) {
     }
 }
 
-fn setup_wasm_status_ui(mut commands: Commands, assets: Res<AssetServer>) {
+fn setup_wasm_status_ui(
+    mut commands: Commands,
+    assets: Res<AssetServer>,
+    existing: Query<(), With<WasmStatusRoot>>,
+) {
+    // Идемпотентно: вызывается и на Startup, и при каждом возврате в Menu
+    // (после игры UI удалён вместе с камерой).
+    if !existing.is_empty() {
+        return;
+    }
     // Дефолтный шрифт Bevy без кириллицы — статус рисуем проектным шрифтом.
     let font = assets.load("fonts/FiraSans-Bold.ttf");
     commands.spawn((Camera2d::default(), WasmUiCamera));
@@ -241,8 +367,11 @@ fn update_wasm_status_ui(
     state: Res<State<AppState>>,
     mut q: Query<&mut Text, With<WasmStatusText>>,
 ) {
-    let msg = if let Some(e) = err.0.as_ref() {
-        format!("{e}\n\nПроверьте, что сервер запущен:\ncargo run -p server")
+    let msg = if boot.attempts > 0 {
+        // идёт серия автопереподключений — err тут не финальный вердикт
+        format!("Переподключение… (попытка {})", boot.attempts)
+    } else if let Some(e) = err.0.as_ref() {
+        e.clone()
     } else if matches!(state.get(), AppState::Connecting) {
         "Подключение к серверу…".to_string()
     } else {
@@ -253,29 +382,72 @@ fn update_wasm_status_ui(
     }
 }
 
-/// Возврат в Menu (первый запуск, ошибка авторизации, таймаут, выход из игры):
-/// сбрасываем автомат подключения и возвращаем HTML-оверлей стартового экрана
-/// (с текстом ошибки, если она есть). Повторный коннект — только по кнопке.
-fn reset_wasm_boot(mut boot: ResMut<WasmBootState>, err: Res<ConnectError>) {
+/// Возврат в Menu. Три сценария:
+/// - СЕТЕВАЯ ошибка (таймаут/обрыв) при живом запросе старта → авторетрай с
+///   бэкоффом: клиент сам перефетчит digest и переподключится — игроку не нужно
+///   ничего нажимать (сервер перезапустился → через пару секунд ты снова в игре);
+/// - отказ авторизации (не тот пароль/сервер полон) → стартовый экран с ошибкой:
+///   ретраить бессмысленно, нужен ввод пользователя;
+/// - ручной выход/первый запуск (ошибки нет) → стартовый экран.
+fn reset_wasm_boot(
+    mut boot: ResMut<WasmBootState>,
+    err: Res<ConnectError>,
+    rejected: Res<crate::lynet::AuthRejected>,
+    time: Res<Time>,
+) {
     boot.phase = WasmBootPhase::Idle;
     if let Ok(mut slot) = boot.digest_slot.lock() {
         *slot = None;
     }
     boot.fetch_started = false;
     boot.status = String::new();
+
+    let network_error = err.0.is_some() && !rejected.0;
+    let can_retry = js_start_request().is_some() && boot.attempts < RECONNECT_MAX_ATTEMPTS;
+    if network_error && can_retry {
+        boot.attempts += 1;
+        // бэкофф: 2с, 3с, 4с… потолок 8с — сервер после деплоя поднимается
+        // за секунды, дольше ждать незачем
+        let delay = (1.0 + boot.attempts as f64).min(8.0);
+        boot.retry_at = time.elapsed_secs_f64() + delay;
+        info!("[wasm] переподключение: попытка {} через {delay:.0}с", boot.attempts);
+        return;
+    }
+    boot.attempts = 0;
     js_return_to_overlay(err.0.as_deref());
 }
 
 fn hide_wasm_status_ui(
     mut commands: Commands,
+    mut boot: ResMut<WasmBootState>,
     q_root: Query<Entity, With<WasmStatusRoot>>,
     q_cam: Query<Entity, With<WasmUiCamera>>,
 ) {
+    // успешный вход — серия автопереподключений закончена
+    boot.attempts = 0;
     for e in q_root.iter().chain(q_cam.iter()) {
         commands.entity(e).despawn();
     }
 }
 
+/// Обрыв соединения ПОСРЕДИ игры (сервер перезапустился/упал): уходим в Menu с
+/// сетевой ошибкой — там включится автопереподключение, и после подъёма сервера
+/// игрок вернётся в бой сам, без F5 и повторного логина.
+fn on_disconnected_ingame(
+    trigger: On<Add, lightyear::prelude::Disconnected>,
+    state: Res<State<AppState>>,
+    mut err: ResMut<ConnectError>,
+    mut next: ResMut<NextState<AppState>>,
+) {
+    let _ = trigger;
+    if matches!(state.get(), AppState::InGame) {
+        warn!("[wasm] соединение потеряно — автопереподключение");
+        err.0 = Some("Соединение с сервером потеряно".into());
+        next.set(AppState::Menu);
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn wasm_boot_tick(
     mut boot: ResMut<WasmBootState>,
     mut cfg: ResMut<ClientConfig>,
@@ -284,6 +456,8 @@ fn wasm_boot_tick(
     mut next: ResMut<NextState<AppState>>,
     mut commands: Commands,
     mut err: ResMut<ConnectError>,
+    mut rejected: ResMut<crate::lynet::AuthRejected>,
+    time: Res<Time>,
 ) {
     match boot.phase {
         WasmBootPhase::Idle => {
@@ -293,9 +467,20 @@ fn wasm_boot_tick(
             // Ждём кнопку «Играть» стартового экрана (index.html): она кладёт
             // имя/пароль в window.__cs2dStart. Заодно это жест пользователя —
             // AudioContext уже разбужен к моменту входа в игру.
-            let Some((name, password)) = js_start_request() else {
+            let Some((name, password, nonce)) = js_start_request() else {
                 return;
             };
+            // Свежий клик по кнопке (nonce сменился) сбрасывает авторетраи.
+            if nonce != boot.last_nonce {
+                boot.last_nonce = nonce;
+                boot.attempts = 0;
+                boot.retry_at = 0.0;
+            }
+            // Бэкофф между автопопытками переподключения.
+            if time.elapsed_secs_f64() < boot.retry_at {
+                boot.status = format!("Переподключение… (попытка {})", boot.attempts);
+                return;
+            }
             let name: String = name.trim().chars().take(24).collect();
             if !name.is_empty() {
                 cfg.name = name;
@@ -305,6 +490,7 @@ fn wasm_boot_tick(
             boot.fetch_started = true;
             boot.status = format!("Читаем TLS digest…\n{}", cfg.connect_address());
             err.0 = None;
+            rejected.0 = false;
 
             // Приоритет: ЯВНЫЙ override (#hash в URL / поле конфига) → свежий
             // HTTP-фетч → пусто (настоящий сертификат). В сборку digest не
