@@ -136,20 +136,19 @@ fn spawn_hotkeys_panel(parent: &mut ChildSpawnerCommands<'_>, font: &UiFont) {
                     ..default()
                 },
             ));
-            for (key, action) in KEYS {
-                panel
-                    .spawn(Node {
-                        flex_direction: FlexDirection::Row,
-                        align_items: AlignItems::Center,
-                        column_gap: Val::Px(10.0),
-                        ..default()
-                    })
-                    .with_children(|row| {
-                        row.spawn((
-                            Node {
-                                width: Val::Px(84.0),
-                                ..default()
-                            },
+            // настоящая сетка (2 колонки): клавиши и действия выровнены по
+            // колонкам, перенос длинной строки не сдвигает соседние ряды
+            panel
+                .spawn(Node {
+                    display: Display::Grid,
+                    grid_template_columns: vec![GridTrack::px(84.0), GridTrack::flex(1.0)],
+                    row_gap: Val::Px(6.0),
+                    column_gap: Val::Px(10.0),
+                    ..default()
+                })
+                .with_children(|grid| {
+                    for (key, action) in KEYS {
+                        grid.spawn((
                             Text::new(key),
                             TextFont {
                                 font: font.0.clone(),
@@ -158,7 +157,7 @@ fn spawn_hotkeys_panel(parent: &mut ChildSpawnerCommands<'_>, font: &UiFont) {
                             },
                             TextColor(Color::srgb(1.0, 0.9, 0.45)),
                         ));
-                        row.spawn((
+                        grid.spawn((
                             Text::new(action),
                             TextFont {
                                 font: font.0.clone(),
@@ -167,8 +166,8 @@ fn spawn_hotkeys_panel(parent: &mut ChildSpawnerCommands<'_>, font: &UiFont) {
                             },
                             TextColor(Color::srgb(0.85, 0.88, 0.92)),
                         ));
-                    });
-            }
+                    }
+                });
         });
 }
 
