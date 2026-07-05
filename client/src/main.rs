@@ -134,7 +134,21 @@ fn main() {
                 .set(WindowPlugin {
                     primary_window: Some(Window {
                         title: "CS2D".into(),
-                        resolution: (1024, 768).into(),
+                        resolution: {
+                            let r: bevy::window::WindowResolution = (1024, 768).into();
+                            // Браузер: рендерим в CSS-пикселях, а не в физических.
+                            // На ретине (dpr=2) канвас иначе рисуется в 4× пикселей —
+                            // слабой интегрированной графике это не по силам.
+                            #[cfg(target_arch = "wasm32")]
+                            let r = r.with_scale_factor_override(1.0);
+                            r
+                        },
+                        // Ниже этого UI разваливается (HUD/полоски перекрываются).
+                        resize_constraints: bevy::window::WindowResizeConstraints {
+                            min_width: 800.0,
+                            min_height: 600.0,
+                            ..default()
+                        },
                         // По центру основного монитора (по умолчанию ОС кидает в угол).
                         // На wasm игнорируется (там канвас, а не окно).
                         position: WindowPosition::Centered(MonitorSelection::Primary),

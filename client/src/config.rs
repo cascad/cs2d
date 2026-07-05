@@ -203,12 +203,26 @@ fn apply_url_overrides(cfg: &mut ClientConfig) {
     let Some(window) = web_sys::window() else {
         return;
     };
+    let mut server_from_url = false;
     if let Ok(search) = window.location().search() {
         if let Some(server) = parse_query_param(&search, "server") {
             if let Some((host, port)) = split_host_port(&server) {
                 cfg.ip = host;
                 cfg.webtransport_port = port;
+                server_from_url = true;
                 info!("⚙ wasm: server из URL → {}", cfg.webtransport_address());
+            }
+        }
+    }
+    // Без ?server= идём на ХОСТ САМОЙ СТРАНИЦЫ, а не на вшитый в конфиг адрес:
+    // локальная разработка (127.0.0.1:8080 → игра на 127.0.0.1:6001) и LAN
+    // работают без параметров, и локальный тест не утекает на прод-IP из
+    // client_config.toml. В проде ?server= всегда подставляет редирект Caddy.
+    if !server_from_url {
+        if let Ok(host) = window.location().hostname() {
+            if !host.is_empty() {
+                cfg.ip = host;
+                info!("⚙ wasm: server по хосту страницы → {}", cfg.webtransport_address());
             }
         }
     }

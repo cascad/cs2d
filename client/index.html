@@ -139,7 +139,9 @@
         }
         #fs:hover { color: #e8e2d4; border-color: rgba(255, 255, 255, 0.3); }
     </style>
-    <link data-trunk rel="rust" data-bin="client" />
+    <!-- wasm-opt -O2: и меньше, и быстрее; без явного атрибута Trunk может
+         пропустить оптимизатор — wasm выходит в разы жирнее -->
+    <link data-trunk rel="rust" data-bin="client" data-wasm-opt="2" />
     <link data-trunk rel="copy-dir" href="../assets" />
     <!-- живой digest сервера для dev (`trunk serve`); в каталоге закоммичен
          только .gitkeep, чтобы сборка не падала на свежем клоне -->

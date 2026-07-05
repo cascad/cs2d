@@ -32,6 +32,14 @@ const FOG_SMOOTH_K: f32 = 12.0;
 /// Сжатие стен при LOS, чтобы луч по грани не давал ложного перекрытия.
 const FOG_EPS: f32 = 0.5;
 
+/// Порог перерасчёта видимости: сдвиг игрока (мир. ед.) / поворот прицела (рад).
+/// LOS-рейкасты по всем тайлам — самая дорогая часть тумана; пока игрок стоит и
+/// не крутит прицел, пересчитывать нечего (сглаживание продолжает работать).
+const FOG_RECALC_MOVE: f32 = 3.0;
+const FOG_RECALC_TURN: f32 = 0.03;
+/// Страховочный период пересчёта (сек) при полной неподвижности.
+const FOG_RECALC_PERIOD: f32 = 0.25;
+
 /// Базовый цвет спрайта тайла (как при спавне) и его мировой центр. Туман каждый
 /// кадр умножает базовый цвет на яркость видимости в этой точке. База хранится,
 /// чтобы повторный множитель не «съедал» цвет; позиция — чтобы не зависеть от
@@ -58,18 +66,16 @@ pub struct FogState {
     map_w: f32,
     map_h: f32,
     darkness: Vec<f32>,
+    /// Целевая «темнота» тайла из последнего LOS-пересчёта; darkness каждый кадр
+    /// сглаживается к ней (дёшево), сам пересчёт — только по движению/таймеру.
+    targets: Vec<f32>,
     explored: Vec<bool>,
+    last_pos: Vec2,
+    last_aim: f32,
+    since_recalc: f32,
 }
 
 impl FogState {
-    /// Мировой центр текселя (ix, iy). iy=0 — верхний ряд (макс. world.y), как в спрайте.
-    #[inline]
-    fn texel_world(&self, ix: usize, iy: usize) -> Vec2 {
-        let x = -self.map_w * 0.5 + (ix as f32 + 0.5) * TILE;
-        let y = self.map_h * 0.5 - (iy as f32 + 0.5) * TILE;
-        Vec2::new(x, y)
-    }
-
     /// «Темнота» (0..1) в точке мира — по тайлу, в котором она лежит. Вне карты —
     /// считаем максимально тёмной (как «никогда не виданное»).
     #[inline]
@@ -99,12 +105,19 @@ pub fn setup_fog(mut commands: Commands) {
         map_w,
         map_h,
         darkness: vec![DARK_HIDDEN; n],
+        targets: vec![DARK_HIDDEN; n],
         explored: vec![false; n],
+        last_pos: Vec2::splat(f32::MAX), // гарантирует пересчёт первым кадром
+        last_aim: 0.0,
+        since_recalc: 0.0,
     });
 }
 
-/// Каждый кадр пересчитываем видимость по тайлам (LOS до игрока) и сглаживаем
-/// темпорально. Результат (сетка «темноты») читает [`apply_fog_tint`].
+/// Видимость по тайлам (LOS до игрока). Дорогая часть — рейкасты по всем тайлам
+/// — выполняется только когда игрок сдвинулся/повернул прицел (или раз в
+/// `FOG_RECALC_PERIOD` для страховки); результат кэшируется в `targets`.
+/// Дешёвое сглаживание `darkness → targets` идёт каждый кадр; сетку читает
+/// [`apply_fog_tint`].
 pub fn update_fog(
     player_q: Query<&crate::render::WorldPos, With<LocalPlayer>>,
     aim: Res<crate::resources::AimAngle>,
@@ -119,56 +132,84 @@ pub fn update_fog(
     let face = aim.0;
 
     let dt = time.delta_secs();
-    let smooth = 1.0 - (-FOG_SMOOTH_K * dt).exp();
-    let fade2 = FOG_VIEW_FADE * FOG_VIEW_FADE;
-    let near2 = FOG_NEAR_RADIUS * FOG_NEAR_RADIUS;
-    let span = (FOG_VIEW_FADE - FOG_VIEW_FULL).max(1.0);
-    // LOS целимся чуть «не доходя» до центра текселя, чтобы грани стен (их центр за
-    // ближней гранью) считались видимыми, а не висели чёрными.
-    let pull = TILE * 0.6;
+    fog.since_recalc += dt;
+    let turn = {
+        use core::f32::consts::{PI, TAU};
+        ((face - fog.last_aim + PI).rem_euclid(TAU) - PI).abs()
+    };
+    let need_recalc = fog.last_pos.distance_squared(player) > FOG_RECALC_MOVE * FOG_RECALC_MOVE
+        || turn > FOG_RECALC_TURN
+        || fog.since_recalc >= FOG_RECALC_PERIOD;
 
-    let cols = fog.cols;
-    let rows = fog.rows;
+    if need_recalc {
+        fog.since_recalc = 0.0;
+        fog.last_pos = player;
+        fog.last_aim = face;
 
-    for iy in 0..rows {
-        for ix in 0..cols {
-            let i = iy * cols + ix;
-            let center = fog.texel_world(ix, iy);
-            let to = center - player;
-            let dist2 = to.length_squared();
+        let fade2 = FOG_VIEW_FADE * FOG_VIEW_FADE;
+        let near2 = FOG_NEAR_RADIUS * FOG_NEAR_RADIUS;
+        let span = (FOG_VIEW_FADE - FOG_VIEW_FULL).max(1.0);
+        // LOS целимся чуть «не доходя» до центра текселя, чтобы грани стен (их
+        // центр за ближней гранью) считались видимыми, а не висели чёрными.
+        let pull = TILE * 0.6;
 
-            // «Сейчас вижу» = внутри края обзора, В КОНУСЕ зрения (не за спиной) И
-            // нет стены на линии взгляда.
-            let in_cone = dist2 <= near2
-                || protocol::combat::in_fov(player, face, center, protocol::constants::VIEW_FOV_HALF_ANGLE);
-            let visible = if dist2 <= fade2 && in_cone {
-                let dist = dist2.sqrt();
-                let test = if dist > pull {
-                    center - to / dist * pull
+        let fog = &mut *fog;
+        let (cols, rows) = (fog.cols, fog.rows);
+        let (map_w, map_h) = (fog.map_w, fog.map_h);
+        for iy in 0..rows {
+            for ix in 0..cols {
+                let i = iy * cols + ix;
+                let center = Vec2::new(
+                    -map_w * 0.5 + (ix as f32 + 0.5) * TILE,
+                    map_h * 0.5 - (iy as f32 + 0.5) * TILE,
+                );
+                let to = center - player;
+                let dist2 = to.length_squared();
+
+                // «Сейчас вижу» = внутри края обзора, В КОНУСЕ зрения (не за
+                // спиной) И нет стены на линии взгляда. Дальние тайлы отсекаются
+                // по дистанции ДО проверки конуса и LOS-рейкаста.
+                let visible = dist2 <= fade2
+                    && (dist2 <= near2
+                        || protocol::combat::in_fov(
+                            player,
+                            face,
+                            center,
+                            protocol::constants::VIEW_FOV_HALF_ANGLE,
+                        ))
+                    && {
+                        let dist = dist2.sqrt();
+                        let test = if dist > pull {
+                            center - to / dist * pull
+                        } else {
+                            player
+                        };
+                        !vision.0.segment_blocked(player, test, FOG_EPS)
+                    };
+
+                if visible {
+                    fog.explored[i] = true;
+                }
+                fog.targets[i] = if visible {
+                    // мягкий купол: в центре прозрачно, к краю обзора плавно
+                    // гаснет до DARK_EXPLORED → чёткий «водораздел» вижу/не вижу
+                    let dist = dist2.sqrt();
+                    let t = ((dist - FOG_VIEW_FULL) / span).clamp(0.0, 1.0);
+                    DARK_VISIBLE + t * (DARK_EXPLORED - DARK_VISIBLE)
+                } else if fog.explored[i] {
+                    DARK_EXPLORED
                 } else {
-                    player
+                    DARK_HIDDEN
                 };
-                !vision.0.segment_blocked(player, test, FOG_EPS)
-            } else {
-                false
-            };
-
-            if visible {
-                fog.explored[i] = true;
             }
-            let target = if visible {
-                // мягкий купол: в центре прозрачно, к краю обзора плавно гаснет до
-                // DARK_EXPLORED → виден чёткий «водораздел» вижу/не вижу
-                let dist = dist2.sqrt();
-                let t = ((dist - FOG_VIEW_FULL) / span).clamp(0.0, 1.0);
-                DARK_VISIBLE + t * (DARK_EXPLORED - DARK_VISIBLE)
-            } else if fog.explored[i] {
-                DARK_EXPLORED
-            } else {
-                DARK_HIDDEN
-            };
-            fog.darkness[i] += (target - fog.darkness[i]) * smooth;
         }
+    }
+
+    // Каждый кадр: дешёвая релаксация darkness → targets (проход по f32-вектору).
+    let smooth = 1.0 - (-FOG_SMOOTH_K * dt).exp();
+    let fog = &mut *fog;
+    for (d, &t) in fog.darkness.iter_mut().zip(fog.targets.iter()) {
+        *d += (t - *d) * smooth;
     }
 }
 
@@ -179,7 +220,18 @@ pub fn update_fog(
 pub fn apply_fog_tint(fog: Res<FogState>, mut q: Query<(&FogTint, &mut Sprite)>) {
     for (tint, mut sprite) in q.iter_mut() {
         let b = (1.0 - fog.darkness_at(tint.pos)).clamp(0.0, 1.0);
+        // Квантуем яркость до шага 1/255 (мельче монитор всё равно не покажет):
+        // без этого асимптотическое сглаживание давало микроскопически новое
+        // значение каждый кадр, и ВСЕ спрайты карты помечались изменёнными —
+        // рендер переизвлекал целую карту ежекадрово даже у стоящего игрока.
+        // Это был главный пожиратель CPU на слабом железе.
+        let b = (b * 255.0).round() / 255.0;
         let base = tint.base;
-        sprite.color = Color::srgba(base.red * b, base.green * b, base.blue * b, base.alpha);
+        let color = Color::srgba(base.red * b, base.green * b, base.blue * b, base.alpha);
+        // Пишем в компонент ТОЛЬКО при реальном изменении (запись = флаг
+        // change detection = переизвлечение спрайта рендером).
+        if sprite.color != color {
+            sprite.color = color;
+        }
     }
 }

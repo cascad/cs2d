@@ -24,3 +24,9 @@ lightyear_replication = { path = "vendor/lightyear_replication" }
 windows      = "0.58.0"
 windows-core = "0.58.0"
 windows-sys  = "0.58.0"
+
+# Release: thin-LTO даёт заметный прирост wasm/натива за счёт времени линковки;
+# strip debuginfo сильно уменьшает wasm (быстрее скачивание и парсинг в браузере).
+[profile.release]
+lto = "thin"
+strip = "debuginfo"

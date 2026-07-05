@@ -110,7 +110,11 @@ fn recv_scoreboard(mut sb: Query<&mut MessageReceiver<Scoreboard>>) {
 
 fn connect_client(mut commands: Commands) {
     let client_addr = SocketAddr::new(Ipv4Addr::UNSPECIFIED.into(), 0);
-    let server_addr = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), SERVER_PORT);
+    // BOT_ADDR=ip:port переопределяет дефолт (127.0.0.1:SERVER_PORT=5000).
+    let server_addr: SocketAddr = std::env::var("BOT_ADDR")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or_else(|| SocketAddr::new(Ipv4Addr::LOCALHOST.into(), SERVER_PORT));
     let auth = Authentication::Manual {
         server_addr,
         client_id: 1,

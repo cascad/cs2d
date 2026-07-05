@@ -113,13 +113,21 @@ impl NetworkVisibilityPlugin {
                     state.visibility = VisibilityState::Visible;
                 }
 
-                // TODO: is it safe to discard the PerSenderReplicationState information?
-                //  what if we knew that we don't have authority over the entity
-                //  so even if we call `gain_visibility` we want to keep that information?
-                //  The issue is that keeping the data around forever could be expensive...
-                // discard these entities since we already sent a despawn message for it
+                // PATCH(cs2d): НЕ выбрасываем запись при потере видимости — в ней
+                // живут флаги predicted/interpolated, выставленные хуками
+                // Replicate/PredictionTarget/InterpolationTarget при спавне.
+                // Оригинальный drop приводил к тому, что при ПОВТОРНОМ входе в зону
+                // интереса (туман войны) gain_visibility создавал запись заново с
+                // ПУСТЫМИ флагами: клиент получал сущность без Predicted/
+                // Interpolated, мост визуала не срабатывал — игрок, вышедший из
+                // поля зрения, оставался НЕВИДИМЫМ до реконнекта (упомянуто и в
+                // апстримном TODO: «is it safe to discard...?» — нет).
+                // Держим запись в Lost со spawned=false: деспавн не повторяется
+                // (проверка `Lost && spawned`), а Gained при возврате пере-отправит
+                // спавн с сохранёнными флагами.
                 if state.visibility == VisibilityState::Lost {
-                    return false;
+                    state.spawned = false;
+                    return true;
                 }
                 true
             })

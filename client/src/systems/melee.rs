@@ -115,14 +115,17 @@ pub fn setup_melee_hint(
 /// не годится).
 pub fn update_melee_hint(
     player_q: Query<(&WorldPos, &Facing), With<LocalPlayer>>,
+    status: Res<crate::resources::LocalStatus>,
     mut hint_q: Query<
         (&mut Transform, &mut Visibility, &mut MeleeHint, &Mesh2d),
         Without<LocalPlayer>,
     >,
     mut meshes: ResMut<Assets<Mesh>>,
 ) {
-    let Ok((wp, facing)) = player_q.single() else {
-        // нет игрока — прячем подсветку
+    // Нет игрока ИЛИ он мёртв (ждёт респауна): прячем подсветку — модель скрыта,
+    // и «контур атаки» без неё висел бесхозным на месте смерти.
+    let live = player_q.single().ok().filter(|_| status.hp > 0);
+    let Some((wp, facing)) = live else {
         if let Ok((_, mut vis, _, _)) = hint_q.single_mut() {
             *vis = Visibility::Hidden;
         }

@@ -49,15 +49,52 @@ pub struct NpcBrain {
 #[derive(Resource, Default)]
 pub struct NpcRespawns(pub Vec<(NpcKind, Vec2, f32)>);
 
-/// Тикает таймеры очереди респауна и возвращает неписей на их «дом».
-pub fn respawn_npcs(mut queue: ResMut<NpcRespawns>, mut commands: Commands) {
+/// Тикает таймеры очереди респауна. Непись возрождается НЕ на «дому» (посреди
+/// комнаты, часто за спиной игрока), а в углу карты, самом дальнем от живых
+/// игроков, — и оттуда идёт к дому. Появление читаемо: врага видно на подходе.
+pub fn respawn_npcs(
+    mut queue: ResMut<NpcRespawns>,
+    map: Option<Res<MapGrids>>,
+    players: Query<(&Position, &Health), (With<Player>, Without<Npc>)>,
+    mut commands: Commands,
+) {
     let mut i = 0;
     while i < queue.0.len() {
         queue.0[i].2 -= TICK_DT;
         if queue.0[i].2 <= 0.0 {
             let (kind, home, _) = queue.0.remove(i);
-            spawn_npc(&mut commands, kind, home);
-            info!("npc respawned: {kind:?} @ ({:.0},{:.0})", home.x, home.y);
+            // Угол, максимально удалённый от БЛИЖАЙШЕГО живого игрока (maximin).
+            // Без игроков/углов — фолбэк на «дом» (как раньше).
+            let spawn_at = map
+                .as_deref()
+                .filter(|m| !m.npc_corners.is_empty())
+                .map(|m| {
+                    let alive: Vec<Vec2> = players
+                        .iter()
+                        .filter(|(_, hp)| hp.0 > 0)
+                        .map(|(p, _)| p.0)
+                        .collect();
+                    *m.npc_corners
+                        .iter()
+                        .max_by(|a, b| {
+                            let da = alive
+                                .iter()
+                                .map(|p| p.distance_squared(**a))
+                                .fold(f32::MAX, f32::min);
+                            let db = alive
+                                .iter()
+                                .map(|p| p.distance_squared(**b))
+                                .fold(f32::MAX, f32::min);
+                            da.total_cmp(&db)
+                        })
+                        .unwrap_or(&home)
+                })
+                .unwrap_or(home);
+            spawn_npc_at(&mut commands, kind, spawn_at, home);
+            info!(
+                "npc respawned: {kind:?} @ угол ({:.0},{:.0}) → дом ({:.0},{:.0})",
+                spawn_at.x, spawn_at.y, home.x, home.y
+            );
         } else {
             i += 1;
         }
@@ -65,7 +102,14 @@ pub fn respawn_npcs(mut queue: ResMut<NpcRespawns>, mut commands: Commands) {
 }
 
 /// Заспавнить непись: реплицируется всем (интерполяция), HP/тип — из протокола.
+/// «Дом» (куда возвращается без агра) совпадает с точкой спавна.
 pub fn spawn_npc(commands: &mut Commands, kind: NpcKind, pos: Vec2) -> Entity {
+    spawn_npc_at(commands, kind, pos, pos)
+}
+
+/// Как [`spawn_npc`], но позиция появления и «дом» различаются (респавн из угла:
+/// появились в углу, идут к дому).
+pub fn spawn_npc_at(commands: &mut Commands, kind: NpcKind, pos: Vec2, home: Vec2) -> Entity {
     commands
         .spawn((
             Npc { kind },
@@ -79,7 +123,7 @@ pub fn spawn_npc(commands: &mut Commands, kind: NpcKind, pos: Vec2) -> Entity {
                 attack_anim: 0.0,
                 hit_left: 0.0,
                 hit_target: None,
-                home: pos,
+                home,
             },
             Position(pos),
             Rotation(core::f32::consts::FRAC_PI_2),
@@ -124,6 +168,7 @@ pub fn npc_ai(
     >,
     map: Option<Res<MapGrids>>,
     mut accounts: ResMut<Accounts>,
+    mut dirty: ResMut<crate::auth::ScoreboardDirty>,
     mut fx: ResMut<crate::fx::FxOut>,
     mut respawns: ResMut<NpcRespawns>,
     mut commands: Commands,
@@ -169,6 +214,11 @@ pub fn npc_ai(
             if let Some(attacker) = killing_attacker {
                 if let Ok((_, player, ..)) = players.get(attacker) {
                     accounts.0.add_npc_kill(player.0.to_bits());
+                    // Без флага счётчик копился только в памяти: таблица очков не
+                    // перерассылалась (и аккаунты не сохранялись) до ближайшего
+                    // ДРУГОГО события — входа/смерти игрока. На проде это
+                    // выглядело как «убитые неписи не считаются».
+                    dirty.0 = true;
                 }
             }
             dead.push((nid, npos.0, npc.kind, brain.home));

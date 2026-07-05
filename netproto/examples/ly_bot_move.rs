@@ -188,7 +188,9 @@ fn on_connected(trigger: On<Add, Connected>) {
 }
 
 /// Режимы: BOT_MODE=move (влево по коридору, прицел фиксирован) |
-/// aim (стоим, прицел вращается) | move_aim (и то и другое, по умолчанию).
+/// aim (стоим, прицел вращается) | move_aim (и то и другое, по умолчанию) |
+/// patrol (туда-сюда по 8с — сущности выходят из зоны интереса и возвращаются:
+/// проверка повторной репликации после тумана войны).
 fn buffer_input(
     time: Res<Time>,
     mut q: Query<&mut ActionState<NetInput>, With<InputMarker<NetInput>>>,
@@ -196,10 +198,20 @@ fn buffer_input(
     let mode = std::env::var("BOT_MODE").unwrap_or_else(|_| "move_aim".into());
     if let Ok(mut action) = q.single_mut() {
         let t = time.elapsed_secs();
-        let aim = if mode == "move" { 0.0 } else { (t * 0.8).sin() * 1.2 };
-        let moving = mode != "aim";
+        let aim = if mode == "move" || mode == "patrol" {
+            0.0
+        } else {
+            (t * 0.8).sin() * 1.2
+        };
+        let (mut left, mut right) = (mode != "aim", false);
+        if mode == "patrol" {
+            let phase_right = (t / 8.0) as u32 % 2 == 1;
+            left = !phase_right;
+            right = phase_right;
+        }
         action.0 = NetInput {
-            left: moving,
+            left,
+            right,
             aim,
             ..default()
         };
@@ -248,6 +260,7 @@ fn track_stats(
     stats.prev_x = Some(pos.0.x);
 }
 
+#[allow(clippy::too_many_arguments)]
 fn report(
     time: Res<Time>,
     mut acc: Local<f32>,
@@ -255,6 +268,12 @@ fn report(
     confirmed: Query<&Confirmed<Position>>,
     metrics: Option<Res<PredictionMetrics>>,
     stats: Res<Stats>,
+    // Контракт видимости: сущности, пере-реплицированные после выхода/входа в
+    // зону интереса (туман войны), ОБЯЗАНЫ снова получать Interpolated. Если
+    // npc_conf > npc_interp устойчиво — флаги записи отправителя потерялись.
+    npc_conf: Query<(), With<netproto::Npc>>,
+    npc_interp: Query<(), (With<netproto::Npc>, With<Interpolated>)>,
+    plr_interp: Query<(), (With<netproto::Player>, With<Interpolated>)>,
 ) {
     *acc += time.delta_secs();
     if *acc < 0.5 {
@@ -269,8 +288,9 @@ fn report(
         .unwrap_or(Vec2::NAN.into());
     let (rb, rbt) = metrics.map(|m| (m.rollbacks, m.rollback_ticks)).unwrap_or((0, 0));
     info!(
-        "STATS: pred=({:.1},{:.1}) conf=({:.1},{:.1}) gap={:.1} rollbacks={} rb_ticks={} yanks={} max_yank={:.1}",
-        p.x, p.y, c.x, c.y, p.distance(c), rb, rbt, stats.yanks, stats.max_yank
+        "STATS: pred=({:.1},{:.1}) conf=({:.1},{:.1}) gap={:.1} rollbacks={} rb_ticks={} yanks={} max_yank={:.1} npc={}/{}interp plr_interp={}",
+        p.x, p.y, c.x, c.y, p.distance(c), rb, rbt, stats.yanks, stats.max_yank,
+        npc_conf.iter().count(), npc_interp.iter().count(), plr_interp.iter().count()
     );
 }
 
