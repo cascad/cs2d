@@ -25,7 +25,8 @@ scp -P $Port -r (Join-Path $repo "dist") "${target}:~/dist"
 if ($LASTEXITCODE -ne 0) { throw "scp failed" }
 
 Write-Host "== deploy to /opt/cs2d/dist =="
-ssh -t -p $Port $target "sudo rsync -a --delete ~/dist/ /opt/cs2d/dist/ && echo '--- deployed: ---' && ls /opt/cs2d/dist | grep client-"
+# после выкладки перевалочная копия в хомяке не нужна — убираем (~60 МБ)
+ssh -t -p $Port $target "sudo rsync -a --delete ~/dist/ /opt/cs2d/dist/ && rm -rf ~/dist && echo '--- deployed: ---' && ls /opt/cs2d/dist | grep client-"
 if ($LASTEXITCODE -ne 0) { throw "remote deploy failed" }
 
 Write-Host "== done: закрой игровые вкладки и открой сайт заново (F5) =="
