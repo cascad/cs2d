@@ -12,6 +12,8 @@
 
 use std::collections::HashMap;
 
+use serde::{Deserialize, Serialize};
+
 use crate::messages::ScoreEntry;
 
 /// Результат попытки авторизации.
@@ -27,23 +29,27 @@ pub enum AuthOutcome {
     AlreadyOnline,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct Account {
     /// Отображаемое имя (как ввёл игрок, с регистром).
     display: String,
     salt: u64,
-    pass_hash: u64,
+    /// hex(SHA-256(salt ‖ password)) — хранится и НА ДИСКЕ, поэтому не FNV.
+    pass_hash: String,
     kills: u32,
     npc_kills: u32,
     deaths: u32,
 }
 
 /// Реестр аккаунтов + кто сейчас онлайн (client_id → ключ аккаунта).
-#[derive(Default)]
+/// Сериализуется на диск целиком, кроме `online` (это состояние соединений
+/// текущего процесса, после рестарта все офлайн).
+#[derive(Default, Serialize, Deserialize)]
 pub struct AccountBook {
     /// ключ (нормализованное имя) → аккаунт
     by_key: HashMap<String, Account>,
     /// client_id → ключ аккаунта (только активные соединения)
+    #[serde(skip)]
     online: HashMap<u64, String>,
     /// монотонный счётчик для генерации уникальной соли при регистрации
     salt_seq: u64,
@@ -60,16 +66,16 @@ fn key_of(name: &str) -> String {
     }
 }
 
-/// FNV-1a (64-bit) от соли и пароля — детерминированный несекретный хеш, чтобы не
-/// держать пароль в открытом виде в памяти. Для in-memory защиты имени этого
-/// достаточно; криптостойкость можно усилить вместе с дисковой персистентностью.
-fn hash_password(salt: u64, password: &str) -> u64 {
-    let mut h: u64 = 0xcbf2_9ce4_8422_2325 ^ salt;
-    for &b in password.as_bytes() {
-        h ^= b as u64;
-        h = h.wrapping_mul(0x0000_0100_0000_01b3);
-    }
-    h
+/// SHA-256 от соли и пароля, hex. Аккаунты теперь живут НА ДИСКЕ
+/// (`state/accounts.json`), так что прежний несекретный FNV заменён на
+/// криптостойкий хеш: утечка файла не раскрывает пароли (игроки любят
+/// переиспользовать их от других сервисов).
+fn hash_password(salt: u64, password: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(salt.to_le_bytes());
+    h.update(password.as_bytes());
+    h.finalize().iter().map(|b| format!("{b:02x}")).collect()
 }
 
 impl AccountBook {
@@ -96,8 +102,11 @@ impl AccountBook {
             AuthOutcome::Authenticated
         } else {
             self.salt_seq = self.salt_seq.wrapping_add(1);
-            // соль уникальна на аккаунт (счётчик ⊕ хеш ключа)
-            let salt = self.salt_seq ^ hash_password(0, &key);
+            // соль уникальна на аккаунт (счётчик, размешанный с FNV-хешем ключа)
+            let key_fnv = key.bytes().fold(0xcbf2_9ce4_8422_2325u64, |h, b| {
+                (h ^ b as u64).wrapping_mul(0x0000_0100_0000_01b3)
+            });
+            let salt = self.salt_seq.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ key_fnv;
             let acc = Account {
                 display: name.trim().to_string(),
                 salt,

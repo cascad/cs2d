@@ -30,9 +30,14 @@ pub struct ServerConfig {
     /// Человекочитаемое имя сервера — показывается в списке серверов клиента.
     #[serde(default = "default_name")]
     pub name: String,
-    /// Лимит игроков (для отображения в лобби). `0` — лимит не задаётся.
-    #[serde(default)]
+    /// Лимит игроков: при достижении новые входы отклоняются («сервер полон»).
+    /// `0` — без лимита (НЕ рекомендуется для публичного сервера).
+    #[serde(default = "default_max_players")]
     pub max_players: u32,
+}
+
+fn default_max_players() -> u32 {
+    16
 }
 
 fn default_webtransport_port() -> u16 {
@@ -61,7 +66,7 @@ impl Default for ServerConfig {
             tls_cert_pem: None,
             tls_key_pem: None,
             name: default_name(),
-            max_players: 0,
+            max_players: default_max_players(),
         }
     }
 }

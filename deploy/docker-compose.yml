@@ -28,6 +28,8 @@ services:
     volumes:
       # живой digest self-signed сертификата — его отдаёт Caddy браузеру
       - ./data/certificates:/app/certificates
+      # аккаунты игроков (state/accounts.json) — переживают рестарты/пересоздания
+      - ./data/state:/app/state
       # свой конфиг (опционально): раскомментируйте и положите файл рядом
       # - ./server_config.toml:/app/server_config.toml
     environment:

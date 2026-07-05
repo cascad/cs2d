@@ -23,7 +23,7 @@ use config::ServerConfig;
 use net::{MetaPlayerCount, start_meta_endpoint};
 use wt_cert::{write_digest_file, WtIdentity};
 use netproto::{
-    Accounts, DamageAttribution, FxOut, MapGrids, NpcGrowls, NpcRespawns, PRIVATE_KEY,
+    DamageAttribution, FxOut, MapGrids, NpcGrowls, NpcRespawns, PRIVATE_KEY,
     PROTOCOL_ID,     PendingStrikes, Player, ProtocolPlugin, ScoreboardDirty, Strikes,
     apply_player_inputs, flush_fx,
     broadcast_scoreboard, npc_ai, npc_growls, on_disconnect_cleanup, resolve_player_deaths,
@@ -64,13 +64,21 @@ fn main() {
     });
     app.add_plugins(ProtocolPlugin);
 
+    // Лимит игроков (0 = без лимита) и персистентность аккаунтов: state/accounts.json
+    // рядом с рабочим каталогом (в docker — том ./data/state, переживает рестарты).
+    app.insert_resource(netproto::ServerLimits {
+        max_players: cfg.max_players,
+    });
+    let accounts_path = std::path::PathBuf::from("state/accounts.json");
+    app.insert_resource(netproto::load_accounts(&accounts_path));
+    app.insert_resource(netproto::AccountsFile(accounts_path));
+
     app.insert_resource(cfg);
     app.insert_resource(meta);
     app.init_resource::<MapGrids>();
     app.init_resource::<Strikes>();
     app.init_resource::<PendingStrikes>();
     app.init_resource::<DamageAttribution>();
-    app.init_resource::<Accounts>();
     app.init_resource::<ScoreboardDirty>();
     app.init_resource::<FxOut>();
     app.init_resource::<NpcRespawns>();

@@ -71,7 +71,11 @@ docker compose up -d --build
 
 # на машине разработчика (wasm в docker не собираем — тяжёлый toolchain)
 cd client && trunk build
-rsync -r --delete ../dist/ vps:/opt/cs2d/dist/
+# ЛОВУШКА scp: если целевой каталог уже существует, scp кладёт копию ВНУТРЬ
+# него (~/dist/dist/) — поэтому сначала сносим цель:
+ssh vps "rm -rf ~/dist"
+scp -r ../dist vps:~/dist
+ssh -t vps "sudo rsync -a --delete ~/dist/ /opt/cs2d/dist/"
 ```
 
 Обновление: `git pull && docker compose up -d --build` + свежий `dist/`.

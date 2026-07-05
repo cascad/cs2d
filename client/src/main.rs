@@ -140,6 +140,9 @@ fn main() {
                         position: WindowPosition::Centered(MonitorSelection::Primary),
                         #[cfg(target_arch = "wasm32")]
                         prevent_default_event_handling: true,
+                        // Канвас растягивается на всё окно браузера (и в фуллскрин).
+                        #[cfg(target_arch = "wasm32")]
+                        fit_canvas_to_parent: true,
                         ..default()
                     }),
                     ..default()

@@ -13,10 +13,12 @@ use std::path::PathBuf;
 
 const FILE_NAME: &str = "client_config.toml";
 
-/// Digest self-signed сертификата WebTransport (dev). На wasm вшивается из
-/// `certificates/digest.txt` при сборке; можно переопределить hash-фрагментом URL.
-#[cfg(target_arch = "wasm32")]
-const DEFAULT_CERT_DIGEST: &str = include_str!("../../certificates/digest.txt");
+// ВАЖНО: digest сертификата в wasm НЕ вшивается. Раньше здесь был
+// include_str!("../../certificates/digest.txt") — сборка молча вшивала
+// СЛУЧАЙНОЕ содержимое локального файла (например, digest чужого сервера,
+// скачанный curl'ом для диагностики), и клиент откатывался на него при сбое
+// HTTP-фетча → недиагностируемый CERTIFICATE_VERIFY_FAILED. Источники digest
+// теперь только явные: URL #hash → HTTP-фетч → пусто (настоящий сертификат).
 
 /// Один сервер из списка лобби. Адрес — строка `ip:port` (тот же порт, что и
 /// игровой; на нём же отвечает мета по TCP).
@@ -127,22 +129,13 @@ impl ClientConfig {
         }
     }
 
-    /// Digest TLS для WebTransportClientIo.
+    /// Digest TLS для WebTransportClientIo: только явный (поле конфига / URL #hash).
     pub fn effective_cert_digest(&self) -> String {
-        #[cfg(target_arch = "wasm32")]
-        {
-            if !self.cert_digest.is_empty() {
-                return self.cert_digest.clone();
-            }
-            parse_digest_file(DEFAULT_CERT_DIGEST)
-        }
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            self.cert_digest.clone()
-        }
+        self.cert_digest.clone()
     }
 
-    /// Digest для connect: runtime (wasm HTTP) → конфиг/URL → embedded.
+    /// Digest для connect: runtime (wasm HTTP-фетч) → конфиг/URL #hash → пусто
+    /// (браузер валидирует настоящий сертификат).
     pub fn connect_cert_digest(&self, runtime: Option<&str>) -> String {
         if let Some(d) = runtime.filter(|s| !s.is_empty()) {
             return d.to_string();

@@ -170,6 +170,43 @@ fn hide_html_loading() {
     }
 }
 
+/// Читает запрос старта со стартового HTML-экрана: `window.__cs2dStart =
+/// {name, password}` выставляет кнопка «Играть» (см. index.html). Пока объекта
+/// нет — игра ждёт (оверлей закрывает канвас).
+fn js_start_request() -> Option<(String, String)> {
+    let win = web_sys::window()?;
+    let val = js_sys::Reflect::get(&win, &wasm_bindgen::JsValue::from_str("__cs2dStart")).ok()?;
+    if !val.is_object() {
+        return None;
+    }
+    let get = |k: &str| {
+        js_sys::Reflect::get(&val, &wasm_bindgen::JsValue::from_str(k))
+            .ok()
+            .and_then(|v| v.as_string())
+            .unwrap_or_default()
+    };
+    Some((get("name"), get("password")))
+}
+
+/// Возврат на стартовый экран (ошибка авторизации/таймаут/выход в меню):
+/// сбрасывает запрос старта и показывает HTML-оверлей с сообщением.
+fn js_return_to_overlay(msg: Option<&str>) {
+    let Some(win) = web_sys::window() else { return };
+    let _ = js_sys::Reflect::set(
+        &win,
+        &wasm_bindgen::JsValue::from_str("__cs2dStart"),
+        &wasm_bindgen::JsValue::UNDEFINED,
+    );
+    if let Ok(f) = js_sys::Reflect::get(&win, &wasm_bindgen::JsValue::from_str("__cs2dShowOverlay")) {
+        if let Some(f) = f.dyn_ref::<js_sys::Function>() {
+            let _ = f.call1(
+                &wasm_bindgen::JsValue::NULL,
+                &wasm_bindgen::JsValue::from_str(msg.unwrap_or("")),
+            );
+        }
+    }
+}
+
 fn setup_wasm_status_ui(mut commands: Commands, assets: Res<AssetServer>) {
     // Дефолтный шрифт Bevy без кириллицы — статус рисуем проектным шрифтом.
     let font = assets.load("fonts/FiraSans-Bold.ttf");
@@ -216,13 +253,17 @@ fn update_wasm_status_ui(
     }
 }
 
-fn reset_wasm_boot(mut boot: ResMut<WasmBootState>) {
+/// Возврат в Menu (первый запуск, ошибка авторизации, таймаут, выход из игры):
+/// сбрасываем автомат подключения и возвращаем HTML-оверлей стартового экрана
+/// (с текстом ошибки, если она есть). Повторный коннект — только по кнопке.
+fn reset_wasm_boot(mut boot: ResMut<WasmBootState>, err: Res<ConnectError>) {
     boot.phase = WasmBootPhase::Idle;
     if let Ok(mut slot) = boot.digest_slot.lock() {
         *slot = None;
     }
     boot.fetch_started = false;
-    boot.status = "Запуск…".into();
+    boot.status = String::new();
+    js_return_to_overlay(err.0.as_deref());
 }
 
 fn hide_wasm_status_ui(
@@ -237,7 +278,7 @@ fn hide_wasm_status_ui(
 
 fn wasm_boot_tick(
     mut boot: ResMut<WasmBootState>,
-    cfg: Res<ClientConfig>,
+    mut cfg: ResMut<ClientConfig>,
     mut runtime_digest: ResMut<RuntimeCertDigest>,
     mut ly: ResMut<LyClient>,
     mut next: ResMut<NextState<AppState>>,
@@ -249,15 +290,26 @@ fn wasm_boot_tick(
             if boot.fetch_started {
                 return;
             }
+            // Ждём кнопку «Играть» стартового экрана (index.html): она кладёт
+            // имя/пароль в window.__cs2dStart. Заодно это жест пользователя —
+            // AudioContext уже разбужен к моменту входа в игру.
+            let Some((name, password)) = js_start_request() else {
+                return;
+            };
+            let name: String = name.trim().chars().take(24).collect();
+            if !name.is_empty() {
+                cfg.name = name;
+            }
+            cfg.password = password;
+
             boot.fetch_started = true;
             boot.status = format!("Читаем TLS digest…\n{}", cfg.connect_address());
             err.0 = None;
 
             // Приоритет: ЯВНЫЙ override (#hash в URL / поле конфига) → свежий
-            // HTTP-фетч → вшитый при сборке. Вшитый digest НЕ короткое
-            // замыкание: сервер генерит новый self-signed сертификат при КАЖДОМ
-            // старте, и вшитое значение протухает при первом же рестарте
-            // сервера (браузер молча ловил TLS-отказ до пересборки wasm).
+            // HTTP-фетч → пусто (настоящий сертификат). В сборку digest не
+            // вшивается: сервер генерит новый self-signed сертификат при КАЖДОМ
+            // старте, и любое вшитое значение протухает при первом же рестарте.
             let preset = cfg.cert_digest.clone();
             if !preset.is_empty() {
                 runtime_digest.0 = Some(preset);
@@ -297,6 +349,7 @@ fn wasm_boot_tick(
             };
             match result {
                 Ok(digest) if !digest.is_empty() => {
+                    info!("[wasm] digest получен по HTTP: {}…", &digest[..digest.len().min(11)]);
                     runtime_digest.0 = Some(digest);
                     try_wasm_connect(
                         &cfg,
@@ -309,21 +362,18 @@ fn wasm_boot_tick(
                     );
                 }
                 Ok(_) | Err(_) => {
-                    // Фетч не удался/пуст. Запасные варианты по порядку:
-                    // 1) вшитый при сборке digest (dev: может быть протухшим);
-                    // 2) ПУСТОЙ digest — прод: на статике digest.txt намеренно
-                    //    отсутствует, браузер валидирует НАСТОЯЩИЙ сертификат
-                    //    (Let's Encrypt) через WebPKI. Хеши тут и не сработали
-                    //    бы: Chrome принимает serverCertificateHashes только для
-                    //    сертификатов со сроком жизни ≤ 2 недель.
-                    let embedded = cfg.effective_cert_digest();
-                    if !embedded.is_empty() {
-                        warn!("[wasm] digest.txt недоступен, используем вшитый (может не совпасть с сервером)");
-                        runtime_digest.0 = Some(embedded);
+                    // Фетч не удался/пуст → подключаемся с ПУСТЫМ digest: прод-
+                    // вариант, где digest.txt на статике намеренно отсутствует и
+                    // браузер валидирует НАСТОЯЩИЙ сертификат (WebPKI). Никаких
+                    // «вшитых» фолбэков: вшитое значение — это случайный локальный
+                    // файл на момент сборки, оно молча давало протухший digest и
+                    // CERTIFICATE_VERIFY_FAILED, который невозможно диагностировать.
+                    if let Err(e) = &result {
+                        warn!("[wasm] digest.txt недоступен ({e}) — пробуем настоящий TLS-сертификат");
                     } else {
-                        info!("[wasm] digest нет нигде — подключаемся по настоящему TLS-сертификату (prod)");
-                        runtime_digest.0 = Some(String::new());
+                        info!("[wasm] digest.txt пуст — подключаемся по настоящему TLS-сертификату (prod)");
                     }
+                    runtime_digest.0 = Some(String::new());
                     try_wasm_connect(
                         &cfg,
                         &mut boot,
@@ -370,13 +420,15 @@ fn try_wasm_connect(
 async fn fetch_digest(url: &str) -> Result<String, String> {
     use wasm_bindgen_futures::JsFuture;
     let win = web_sys::window().ok_or("нет window")?;
-    // cache: no-store ОБЯЗАТЕЛЕН: digest меняется при каждом рестарте сервера,
-    // а обычный fetch отдаёт закэшированный файл (Ctrl+F5 страницу перегружает,
-    // но кэш для fetch() из wasm НЕ сбрасывает) — клиент коннектился со старым
-    // digest и ловил CERTIFICATE_VERIFY_FAILED до чистки кэша.
+    // Digest меняется при каждом рестарте сервера, а fetch без предосторожностей
+    // отдаёт закэшированный файл (Ctrl+F5 перегружает страницу, но кэш для
+    // fetch() из wasm НЕ сбрасывает) → клиент коннектился со старым digest и
+    // ловил CERTIFICATE_VERIFY_FAILED. Двойная защита: cache-buster в URL
+    // (пробивает ЛЮБОЙ слой кэша, включая промежуточные) + cache: no-store.
+    let url = format!("{url}?t={}", crate::platform::now_nanos());
     let opts = web_sys::RequestInit::new();
     opts.set_cache(web_sys::RequestCache::NoStore);
-    let req = web_sys::Request::new_with_str_and_init(url, &opts)
+    let req = web_sys::Request::new_with_str_and_init(&url, &opts)
         .map_err(|_| "bad request".to_string())?;
     let resp_val = JsFuture::from(win.fetch_with_request(&req))
         .await
