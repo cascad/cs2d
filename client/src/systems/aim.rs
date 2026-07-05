@@ -16,6 +16,7 @@ pub fn spawn_aim_marker(mut commands: Commands) {
         Transform::from_xyz(0.0, 0.0, 1.0),
         GlobalTransform::default(),
         AimMarker,
+        crate::components::SessionScoped,
     ));
 
     // Жёлтая линия
@@ -28,6 +29,7 @@ pub fn spawn_aim_marker(mut commands: Commands) {
         Transform::from_xyz(0.0, 0.0, 0.5),
         GlobalTransform::default(),
         AimLineMarker,
+        crate::components::SessionScoped,
     ));
 }
 

@@ -121,7 +121,7 @@ pub fn create_fixed_level(
             }
             let name = if aged { aged_name } else { plain };
             let layer = layers::WALL + k as f32 * 0.003;
-            commands.spawn((
+            commands.spawn((crate::components::SessionScoped,
                 Sprite { image: env.get(name), color: tint, custom_size: Some(wall_size), ..default() },
                 anchor,
                 Transform::from_xyz(s.x, s.y, depth_z(*center, layer)),
@@ -149,7 +149,7 @@ pub fn create_fixed_level(
             layers::PROP_SEETHROUGH
         };
         let s = world_to_screen(*center);
-        commands.spawn((
+        commands.spawn((crate::components::SessionScoped,
             Sprite {
                 image: env.get(prop_image(*prop)),
                 color: tint,

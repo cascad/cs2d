@@ -81,6 +81,7 @@ pub fn setup_minimap(mut commands: Commands, mut images: ResMut<Assets<Image>>) 
             BackgroundColor(Color::srgba(0.04, 0.04, 0.06, 0.85)),
             GlobalZIndex(50),
             MinimapRoot,
+            crate::components::SessionScoped,
             Visibility::Visible,
             Name::new("Minimap"),
         ))

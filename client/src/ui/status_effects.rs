@@ -33,6 +33,7 @@ pub fn setup_status_effects_ui(mut commands: Commands, font: Res<UiFont>) {
             },
             Visibility::Hidden,
             StunEffectRoot,
+            crate::components::SessionScoped,
             Name::new("StatusEffect: Stun"),
         ))
         .with_children(|slot| {

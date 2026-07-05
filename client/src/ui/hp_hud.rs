@@ -10,8 +10,9 @@ pub struct HpHudBar;
 #[derive(Component)]
 pub struct HpHudText;
 
-/// HUD здоровья локального игрока: подложка + заливка + число. Внизу справа, над
-/// индикаторами кулдаунов/стамины (рядом с остальным HUD).
+/// HUD здоровья локального игрока: подложка + заливка + число. Внизу справа,
+/// НАД индикаторами кулдаунов (верхний — STUN на bottom 108 + ~20 высоты =
+/// до ~128): bottom 134 даёт зазор, прежние 110 накладывали HP прямо на STUN.
 pub fn setup_hp_hud(mut commands: Commands, font: Res<UiFont>) {
     commands
         .spawn((
@@ -19,13 +20,14 @@ pub fn setup_hp_hud(mut commands: Commands, font: Res<UiFont>) {
                 width: Val::Px(164.0),
                 height: Val::Px(20.0),
                 position_type: PositionType::Absolute,
-                bottom: Val::Px(110.0),
+                bottom: Val::Px(134.0),
                 right: Val::Px(20.0),
                 align_items: AlignItems::Center,
                 justify_content: JustifyContent::Center,
                 ..default()
             },
             BackgroundColor(Color::srgba(0.1, 0.1, 0.1, 0.6)),
+            crate::components::SessionScoped,
         ))
         .with_children(|parent| {
             // заливка HP (растёт слева направо), на всю высоту, абсолютно слева

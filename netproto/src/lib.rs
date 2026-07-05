@@ -10,6 +10,7 @@
 //! по компонентам и каналы настроим в следующих стадиях.
 
 pub mod auth;
+pub mod client_sync;
 pub mod components;
 pub mod fx;
 pub mod grenade;
@@ -26,6 +27,7 @@ pub use auth::{
     broadcast_scoreboard, kick_afk_players, load_accounts, on_disconnect_cleanup,
     server_handle_auth, spawn_authed_player,
 };
+pub use client_sync::{InputDelayPolicy, expected_delay_ticks, refresh_input_delay};
 pub use components::*;
 pub use fx::{FxChannel, FxOut, flush_fx};
 pub use grenade::{Grenade, GrenadePhysics, spawn_grenade, spawn_grenades, update_grenades};

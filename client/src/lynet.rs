@@ -178,6 +178,14 @@ impl Plugin for LyNetPlugin {
                 .run_if(in_state(AppState::InGame)),
         );
 
+        // «Разморозка» залипшей задержки ввода (netproto::client_sync): та же
+        // политика, что уходит в InputTimelineConfig при коннекте (connect_to).
+        app.insert_resource(netproto::InputDelayPolicy::new(
+            active_input_delay(),
+            active_sync_config(),
+        ));
+        app.add_systems(Update, netproto::refresh_input_delay);
+
         app.add_systems(OnExit(AppState::InGame), teardown_net);
     }
 }
@@ -189,6 +197,42 @@ impl Plugin for LyNetPlugin {
 /// Случайный client_id netcode на процесс
 fn random_client_id() -> u64 {
     (crate::platform::now_nanos() ^ crate::platform::random_u64().rotate_left(32)) | 1
+}
+
+/// Конфиг задержки ввода. Нативно: balanced (0-3 тика по RTT). В браузере
+/// минимум 2 тика (30 мс): event loop браузера квантует отправку/приём по
+/// кадрам rAF, и при около-нулевом RTT localhost инпуты без запаса приходят
+/// на сервер ВПРИТЫК к своему тику (lightyear#1402) — любой хитч страницы
+/// делает их опоздавшими (сервер шагает по прошлому вводу → откаты/дёрганье).
+/// maximum_predicted_ticks 20 (не дефолтные 7): излишек RTT сверх задержки
+/// покрывается предсказанием, поэтому задержка ввода остаётся 3 тика (45 мс)
+/// вплоть до эффективного RTT ~345 мс — плохой Wi-Fi не превращается в «вату».
+/// Ресимуляция отката у нас дешёвая (один игрок тем же step_player).
+fn active_input_delay() -> InputDelayConfig {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        InputDelayConfig::balanced()
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        InputDelayConfig {
+            minimum_input_delay_ticks: 2,
+            maximum_input_delay_before_prediction: 3,
+            maximum_predicted_ticks: 20,
+        }
+    }
+}
+
+/// Конфиг синхронизации таймлайна. handshake_pings 8 (не дефолтные 3): первый
+/// снапшот задержки ввода снимается по 8 сэмплам RTT вместо 3, причём защита
+/// оценщика от выбросов включается только с 3-го сэмпла — с тремя пингами весь
+/// замер приходился на «слепые» сэмплы ровно в окне джанка загрузки страницы.
+/// С ping_interval 50 мс (см. connect_to) рукопожатие занимает те же ~400 мс.
+fn active_sync_config() -> SyncConfig {
+    SyncConfig {
+        handshake_pings: 8,
+        ..Default::default()
+    }
 }
 
 /// Создаёт сущность-клиент и инициирует подключение к `server_addr`.
@@ -220,20 +264,8 @@ pub fn connect_to(
         },
     )
     .expect("netcode client");
-    // Нативно: balanced (0-3 тика задержки по RTT). В браузере добавляем ПОЛ
-    // минимум 2 тика (30 мс): event loop браузера квантует отправку/приём по
-    // кадрам rAF, и при около-нулевом RTT localhost инпуты без запаса приходят
-    // на сервер ВПРИТЫК к своему тику (lightyear#1402) — любой хитч страницы
-    // делает их опоздавшими (сервер шагает по прошлому вводу → откаты/дёрганье).
-    #[cfg(not(target_arch = "wasm32"))]
-    let input_delay = InputDelayConfig::balanced();
-    #[cfg(target_arch = "wasm32")]
-    let input_delay = InputDelayConfig {
-        minimum_input_delay_ticks: 2,
-        maximum_input_delay_before_prediction: 3,
-        maximum_predicted_ticks: 7,
-    };
-    let input_timeline = InputTimelineConfig::default().with_input_delay(input_delay);
+    let input_delay = active_input_delay();
+    let input_timeline = InputTimelineConfig::new(active_sync_config(), input_delay);
     let interpolation = InterpolationConfig::default()
         .with_min_delay(Duration::from_millis(10))
         .with_send_interval_ratio(1.7);
@@ -263,6 +295,12 @@ pub fn connect_to(
             ReplicationReceiver::default(),
             PredictionManager::default(),
             input_timeline,
+            // Пинги чаще дефолтных 100 мс: оценка RTT-EWMA после джанка страницы
+            // выздоравливает вдвое быстрее, и рукопожатие из 8 пингов (см.
+            // active_sync_config) укладывается в те же ~400 мс, что дефолтные 3×100.
+            PingManager::new(PingConfig {
+                ping_interval: Duration::from_millis(50),
+            }),
             interpolation,
             netcode,
             io_bundle,
@@ -1040,6 +1078,7 @@ fn recv_fx(
                                 frame: 0,
                                 anim: Timer::from_seconds(1.0 / 24.0, TimerMode::Repeating),
                             },
+                            crate::components::SessionScoped,
                         ))
                         .id();
                     corpses.register(&mut commands, corpse);

@@ -132,6 +132,7 @@ fn spawn_fx_layer(
         ViewVisibility::default(),
         fx,
         ExplosionMaterial(mat_handle),
+        crate::components::SessionScoped,
     ));
 }
 

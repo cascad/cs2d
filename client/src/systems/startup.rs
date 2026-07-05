@@ -215,6 +215,24 @@ pub fn despawn_game_camera(mut commands: Commands, q: Query<Entity, With<GameCam
     }
 }
 
+/// Полная зачистка сессионной сцены на выходе из игры (реконнект/меню): всё,
+/// что помечено `SessionScoped` (уровень, HUD, подсветки, маркеры прицела,
+/// трупы, декали), деспавнится разом. Без этого каждый реконнект спавнил
+/// ВТОРЫЕ копии, и single()-системы молча отключались (контур удара замерзал
+/// на полу, строки табла очков пропадали, кольцо гранаты отваливалось).
+pub fn despawn_session_scene(
+    mut commands: Commands,
+    q: Query<Entity, With<crate::components::SessionScoped>>,
+    mut corpses: ResMut<crate::resources::Corpses>,
+) {
+    for e in &q {
+        commands.entity(e).despawn();
+    }
+    // Сущности трупов уже уходят по маркеру — чистим только реестр,
+    // иначе Corpses.register после реконнекта деспавнил бы «призраков».
+    corpses.0.clear();
+}
+
 pub fn load_ui_font(mut commands: Commands, asset_server: Res<AssetServer>) {
     let handle = asset_server.load("fonts/FiraSans-Bold.ttf");
     commands.insert_resource(UiFont(handle));

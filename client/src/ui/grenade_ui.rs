@@ -19,6 +19,7 @@ pub fn setup_grenade_ui(mut commands: Commands, font: Res<UiFont>) {
             column_gap: Val::Px(6.0),
             ..default()
         })
+        .insert(crate::components::SessionScoped)
         .with_children(|row| {
             row.spawn((
                 Text::new("NADE"),

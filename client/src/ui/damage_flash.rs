@@ -39,6 +39,7 @@ pub fn setup_damage_flash(mut commands: Commands) {
         // поверх остального HUD; без Interaction-компонента клики не перехватываются
         GlobalZIndex(50),
         DamageFlash::default(),
+        crate::components::SessionScoped,
     ));
 }
 

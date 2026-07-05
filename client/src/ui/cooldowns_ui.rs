@@ -31,6 +31,7 @@ fn spawn_indicator(commands: &mut Commands, font: &Handle<Font>, bottom: f32, la
             column_gap: Val::Px(6.0),
             ..default()
         })
+        .insert(crate::components::SessionScoped)
         .with_children(|row| {
             row.spawn((
                 Text::new(label),

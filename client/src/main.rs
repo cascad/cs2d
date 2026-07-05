@@ -231,6 +231,11 @@ fn main() {
         // выход из игры (возврат в меню/реконнект): убираем игровую камеру, чтобы
         // не копились камеры с одинаковым order (рендер иначе спамит warning)
         .add_systems(OnExit(AppState::InGame), despawn_game_camera)
+        // зачистка сессионной сцены: уровень/HUD/подсветки/трупы (SessionScoped)
+        .add_systems(
+            OnExit(AppState::InGame),
+            crate::systems::startup::despawn_session_scene,
+        )
         .add_systems(Update, update_aim_to_mouse.run_if(in_state(AppState::InGame)))
         // --- звук по событиям боя (только на карте) ---
         .add_systems(

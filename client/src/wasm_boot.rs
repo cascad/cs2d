@@ -83,6 +83,7 @@ impl Plugin for WasmBootPlugin {
                     update_wasm_status_ui
                         .run_if(in_state(AppState::Menu).or(in_state(AppState::Connecting))),
                     wasm_heartbeat,
+                    wasm_sync_probe,
                     wasm_move_probe,
                     wasm_warmup_probe,
                 ),
@@ -249,6 +250,54 @@ fn wasm_warmup_probe(
         );
         info!("[wasm] готово: ассеты {loaded}/{total}, fps={fps:.0} (t={now:.1}с)");
     }
+}
+
+/// Диагностика синка Lightyear (пара к [hb], раз в ~2 с): применяемая ПРЯМО
+/// СЕЙЧАС задержка ввода (delay), отрыв штампуемых вводов от последнего
+/// услышанного серверного тика (ahead) и RTT/джиттер глазами самого синка
+/// (EWMA PingManager; rtt в [hb] — их копия из Link.stats). Болезнь выглядит
+/// так: delay в десятках-сотнях тиков при нормальном rtt — стартовый замер
+/// попал в джанк страницы и «залип» (лечится refresh_input_delay в lynet.rs).
+/// Норма: delay=3, ahead ≈ (rtt + 4·jit + 5мс)/15мс + delay.
+fn wasm_sync_probe(
+    time: Res<Time>,
+    mut last: Local<f64>,
+    local: Res<lightyear::prelude::LocalTimeline>,
+    clients: Query<
+        (
+            &lightyear::prelude::client::InputTimeline,
+            &lightyear::prelude::client::RemoteTimeline,
+            &lightyear::prelude::PingManager,
+            Has<lightyear::prelude::IsSynced<lightyear::prelude::client::InputTimeline>>,
+        ),
+        With<lightyear::prelude::Client>,
+    >,
+) {
+    let now = time.elapsed_secs_f64();
+    if now - *last < 2.0 {
+        return;
+    }
+    *last = now;
+    let Ok((input, remote, ping, synced)) = clients.single() else {
+        return;
+    };
+    // Тик, которым будут проштампованы вводы ЭТОГО кадра — ровно так же считает
+    // buffer_action_state в lightyear_inputs (LocalTimeline + delay; сам
+    // InputTimeline.tick() в Update неточен — обновляется в PostUpdate).
+    let delay = input.input_delay();
+    let input_tick = local.tick() + delay as i16;
+    // Последний услышанный серверный тик (сглаженная remote-оценка наружу не
+    // экспортируется в 0.26.4). Tick - Tick == i16 (wrapping), 1 тик = 15 мс.
+    let ahead = remote.last_received_tick().map(|rt| input_tick - rt);
+    info!(
+        "[sync] delay={}t ahead={:?}t rtt={:.0}ms jit={:.0}ms pongs={} synced={}",
+        delay,
+        ahead,
+        ping.rtt().as_secs_f64() * 1000.0,
+        ping.jitter().as_secs_f64() * 1000.0,
+        ping.pongs_recv,
+        synced,
+    );
 }
 
 /// Мгновенный лог движения предсказанного игрока (только wasm, для замера

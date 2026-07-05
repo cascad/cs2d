@@ -57,6 +57,7 @@ pub fn spawn_player_melee_decal(
         MeleeArc {
             timer: Timer::from_seconds(MELEE_ARC_TTL, TimerMode::Once),
         },
+        crate::components::SessionScoped,
     ));
 }
 
@@ -106,6 +107,7 @@ pub fn setup_melee_hint(
         Transform::from_xyz(0.0, 0.0, MELEE_DECAL_LAYER - 1.0),
         Visibility::Hidden, // покажем, когда найдём игрока
         MeleeHint { last_angle: f32::NAN },
+        crate::components::SessionScoped,
     ));
 }
 

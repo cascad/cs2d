@@ -26,3 +26,11 @@ tokio = { version = "1", features = ["rt"] }
 [dev-dependencies]
 bevy = { version = "0.18", default-features = false }
 protocol = { path = "../protocol" }
+# Тест unstable_ping собирает КЛИЕНТСКОЕ приложение против реального серверного
+# бинаря (CARGO_BIN_EXE_server): нужна client-фича lightyear (фичи аддитивны).
+lightyear = { version = "0.26", features = [
+    "client",
+    "netcode",
+    "udp",
+    "input_native",
+] }

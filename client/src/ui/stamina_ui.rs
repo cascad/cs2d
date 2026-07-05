@@ -22,6 +22,7 @@ pub fn setup_stamina_ui(mut commands: Commands, font: Res<UiFont>) {
             column_gap: Val::Px(6.0),
             ..default()
         })
+        .insert(crate::components::SessionScoped)
         .with_children(|row| {
             row.spawn((
                 Text::new("STA"),

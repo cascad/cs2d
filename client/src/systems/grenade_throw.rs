@@ -30,6 +30,7 @@ pub fn setup_grenade_aim(
         Transform::from_xyz(0.0, 0.0, layers::AIM),
         Visibility::Hidden,
         GrenadeAim,
+        crate::components::SessionScoped,
     ));
 }
 

@@ -310,6 +310,7 @@ pub fn spawn_npc_corpse(
     let dir = npc_dir(facing);
     commands
         .spawn((
+            crate::components::SessionScoped,
             Sprite {
                 image: anims.get(kind).death[dir][0].clone(),
                 color: vis.base,
